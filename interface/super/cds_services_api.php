@@ -29,7 +29,8 @@ $action = $_POST['action'] ?? $_GET['action'];
 
 // CSRF protection for POST requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!CsrfUtils::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+    $csrfToken = $_POST['csrf_token'] ?? $_POST['csrf_token_form'] ?? '';
+    if (!CsrfUtils::verifyCsrfToken($csrfToken)) {
         http_response_code(403);
         echo json_encode(['error' => 'CSRF token verification failed']);
         exit;
@@ -197,7 +198,7 @@ switch ($action) {
     case 'toggle_service':
         try {
             $serviceId = $_POST['service_id'] ?? '';
-            $enabled = isset($_POST['enabled']) && $_POST['enabled'] === 'true';
+            $enabled = ($_POST['enabled'] ?? '') === '1' || ($_POST['enabled'] ?? '') === 'true';
             
             if (empty($serviceId)) {
                 throw new Exception('Service ID is required');

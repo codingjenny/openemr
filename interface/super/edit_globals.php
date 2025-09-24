@@ -825,110 +825,140 @@ function checkBackgroundServices(): void
                                                     echo "<p class='text-muted'>" . xlt('Click "Discover Services" or "Refresh Services" to load CDS Hooks services.') . "</p>";
                                                     echo "</div>";
                                                     echo "</div>";
-                                                    echo "<script>";
-                                                    echo "function discoverCDSServices() {";
-                                                    echo "    // Find the CDS Hooks Discovery URL input field by looking for the closest form input in the CDS Hooks section";
-                                                    echo "    const cdsSection = document.querySelector('li a').textContent.includes('" . xls('CDS Hooks') . "') ? document.querySelector('div.tab.current') : null;";
-                                                    echo "    let discoveryUrl = '';";
-                                                    echo "    if (cdsSection) {";
-                                                    echo "        const inputs = cdsSection.querySelectorAll('input[type=\"text\"]');";
-                                                    echo "        for (let input of inputs) {";
-                                                    echo "            const label = input.closest('.form-group')?.querySelector('.col-sm-6')?.textContent || '';";
-                                                    echo "            if (label.includes('" . xls('CDS Hooks Discovery URL') . "')) {";
-                                                    echo "                discoveryUrl = input.value;";
-                                                    echo "                break;";
-                                                    echo "            }";
-                                                    echo "        }";
-                                                    echo "    }";
-                                                    echo "    if (!discoveryUrl) {";
-                                                    echo "        alert('" . xls('Please set the CDS Hooks Discovery URL first.') . "');";
-                                                    echo "        return;";
-                                                    echo "    }";
-                                                    echo "    fetch('cds_services_api.php?action=discover&discovery_url=' + encodeURIComponent(discoveryUrl))";
-                                                    echo "        .then(response => response.json())";
-                                                    echo "        .then(data => {";
-                                                    echo "            if (data.success) {";
-                                                    echo "                loadCDSServices();";
-                                                    echo "            } else {";
-                                                    echo "                alert('" . xls('Failed to discover services:') . " ' + data.error);";
-                                                    echo "            }";
-                                                    echo "        })";
-                                                    echo "        .catch(error => {";
-                                                    echo "            console.error('Error:', error);";
-                                                    echo "            alert('" . xls('Error discovering services.') . "');";
-                                                    echo "        });";
-                                                    echo "}";
-                                                    echo "function loadCDSServices() {";
-                                                    echo "    fetch('cds_services_api.php?action=get_services')";
-                                                    echo "        .then(response => response.json())";
-                                                    echo "        .then(data => {";
-                                                    echo "            if (data.success) {";
-                                                    echo "                displayCDSServices(data.services);";
-                                                    echo "            } else {";
-                                                    echo "                document.getElementById('cds_services_list').innerHTML = '<p class=\"text-danger\">" . xls('Failed to load services:') . " ' + data.error + '</p>';";
-                                                    echo "            }";
-                                                    echo "        })";
-                                                    echo "        .catch(error => {";
-                                                    echo "            console.error('Error:', error);";
-                                                    echo "            document.getElementById('cds_services_list').innerHTML = '<p class=\"text-danger\">" . xls('Error loading services.') . "</p>';";
-                                                    echo "        });";
-                                                    echo "}";
-                                                    echo "function displayCDSServices(services) {";
-                                                    echo "    let html = '';";
-                                                    echo "    if (services.length === 0) {";
-                                                    echo "        html = '<p class=\"text-muted\">" . xls('No CDS Hooks services found.') . "</p>';";
-                                                    echo "    } else {";
-                                                    echo "        html = '<div class=\"table-responsive\"><table class=\"table table-sm table-bordered\">';";
-                                                    echo "        html += '<thead class=\"thead-light\"><tr><th>" . xls('Service') . "</th><th>" . xls('Description') . "</th><th>" . xls('Hook') . "</th><th>" . xls('Status') . "</th><th>" . xls('Actions') . "</th></tr></thead>';";
-                                                    echo "        html += '<tbody>';";
-                                                    echo "        services.forEach(service => {";
-                                                    echo "            html += '<tr>';";
-                                                    echo "            html += '<td><strong>' + service.id + '</strong></td>';";
-                                                    echo "            html += '<td>' + (service.description || '" . xls('No description') . "') + '</td>';";
-                                                    echo "            html += '<td>' + service.hook + '</td>';";
-                                                    echo "            html += '<td>';";
-                                                    echo "            if (service.enabled) {";
-                                                    echo "                html += '<span class=\"badge badge-success\">" . xls('Enabled') . "</span>';";
-                                                    echo "            } else {";
-                                                    echo "                html += '<span class=\"badge badge-secondary\">" . xls('Disabled') . "</span>';";
-                                                    echo "            }";
-                                                    echo "            html += '</td>';";
-                                                    echo "            html += '<td>';";
-                                                    echo "            if (service.enabled) {";
-                                                    echo "                html += '<button class=\"btn btn-sm btn-warning\" onclick=\"toggleCDSService(\\'' + service.id + '\\', false)\">" . xls('Disable') . "</button>';";
-                                                    echo "            } else {";
-                                                    echo "                html += '<button class=\"btn btn-sm btn-success\" onclick=\"toggleCDSService(\\'' + service.id + '\\', true)\">" . xls('Enable') . "</button>';";
-                                                    echo "            }";
-                                                    echo "            html += '</td>';";
-                                                    echo "            html += '</tr>';";
-                                                    echo "        });";
-                                                    echo "        html += '</tbody></table></div>';";
-                                                    echo "    }";
-                                                    echo "    document.getElementById('cds_services_list').innerHTML = html;";
-                                                    echo "}";
-                                                    echo "function toggleCDSService(serviceId, enable) {";
-                                                    echo "    const csrfToken = document.querySelector('input[name=\"csrf_token_form\"]')?.value || '';";
-                                                    echo "    fetch('cds_services_api.php', {";
-                                                    echo "        method: 'POST',";
-                                                    echo "        headers: {";
-                                                    echo "            'Content-Type': 'application/x-www-form-urlencoded',";
-                                                    echo "        },";
-                                                    echo "        body: 'action=toggle_service&service_id=' + encodeURIComponent(serviceId) + '&enabled=' + (enable ? '1' : '0') + '&csrf_token_form=' + encodeURIComponent(csrfToken)";
-                                                    echo "    })";
-                                                    echo "    .then(response => response.json())";
-                                                    echo "    .then(data => {";
-                                                    echo "        if (data.success) {";
-                                                    echo "            loadCDSServices();";
-                                                    echo "        } else {";
-                                                    echo "            alert('" . xls('Failed to update service:') . " ' + data.error);";
-                                                    echo "        }";
-                                                    echo "    })";
-                                                    echo "    .catch(error => {";
-                                                    echo "        console.error('Error:', error);";
-                                                    echo "        alert('" . xls('Error updating service.') . "');";
-                                                    echo "    });";
-                                                    echo "}";
-                                                    echo "</script>";
+                                                    ?>
+                                                    <script>
+                                                    // AI-generated JavaScript functions for CDS Hooks service management
+                                                    function discoverCDSServices() {
+                                                        console.log('discoverCDSServices called');
+                                                        
+                                                        // Find the CDS Hooks Discovery URL input field
+                                                        let discoveryUrl = '';
+                                                        const allInputs = document.querySelectorAll('input[type="text"]');
+                                                        
+                                                        for (let input of allInputs) {
+                                                            const formGroup = input.closest('.form-group');
+                                                            if (formGroup) {
+                                                                const label = formGroup.querySelector('.col-sm-6')?.textContent || '';
+                                                                if (label.includes('<?php echo addslashes(xls('CDS Hooks Discovery URL')); ?>')) {
+                                                                    discoveryUrl = input.value.trim();
+                                                                    console.log('Found discovery URL:', discoveryUrl);
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        if (!discoveryUrl) {
+                                                            alert('<?php echo addslashes(xls('Please set the CDS Hooks Discovery URL first.')); ?>');
+                                                            return;
+                                                        }
+                                                        
+                                                        fetch('cds_services_api.php?action=discover&discovery_url=' + encodeURIComponent(discoveryUrl))
+                                                            .then(response => response.json())
+                                                            .then(data => {
+                                                                console.log('Discovery response:', data);
+                                                                if (data.success) {
+                                                                    loadCDSServices();
+                                                                } else {
+                                                                    alert('<?php echo addslashes(xls('Failed to discover services:')); ?> ' + (data.error || ''));
+                                                                }
+                                                            })
+                                                            .catch(error => {
+                                                                console.error('Error:', error);
+                                                                alert('<?php echo addslashes(xls('Error discovering services.')); ?>');
+                                                            });
+                                                    }
+
+                                                    function loadCDSServices() {
+                                                        console.log('loadCDSServices called');
+                                                        
+                                                        fetch('cds_services_api.php?action=get_services')
+                                                            .then(response => response.json())
+                                                            .then(data => {
+                                                                console.log('Load services response:', data);
+                                                                if (data.success) {
+                                                                    displayCDSServices(data.services);
+                                                                } else {
+                                                                    document.getElementById('cds_services_list').innerHTML = '<p class="text-danger"><?php echo addslashes(xls('Failed to load services:')); ?> ' + (data.error || '') + '</p>';
+                                                                }
+                                                            })
+                                                            .catch(error => {
+                                                                console.error('Error:', error);
+                                                                document.getElementById('cds_services_list').innerHTML = '<p class="text-danger"><?php echo addslashes(xls('Error loading services.')); ?></p>';
+                                                            });
+                                                    }
+
+                                                    function displayCDSServices(services) {
+                                                        console.log('displayCDSServices called with:', services);
+                                                        
+                                                        let html = '';
+                                                        if (services.length === 0) {
+                                                            html = '<p class="text-muted"><?php echo addslashes(xls('No CDS Hooks services found.')); ?></p>';
+                                                        } else {
+                                                            html = '<div class="table-responsive"><table class="table table-sm table-bordered">';
+                                                            html += '<thead class="thead-light"><tr><th><?php echo addslashes(xls('Service')); ?></th><th><?php echo addslashes(xls('Description')); ?></th><th><?php echo addslashes(xls('Hook')); ?></th><th><?php echo addslashes(xls('Status')); ?></th><th><?php echo addslashes(xls('Actions')); ?></th></tr></thead>';
+                                                            html += '<tbody>';
+                                                            
+                                                            services.forEach(service => {
+                                                                html += '<tr>';
+                                                                html += '<td><strong>' + service.id + '</strong></td>';
+                                                                html += '<td>' + (service.description || '<?php echo addslashes(xls('No description')); ?>') + '</td>';
+                                                                html += '<td>' + service.hook + '</td>';
+                                                                html += '<td>';
+                                                                if (service.enabled) {
+                                                                    html += '<span class="badge badge-success"><?php echo addslashes(xls('Enabled')); ?></span>';
+                                                                } else {
+                                                                    html += '<span class="badge badge-secondary"><?php echo addslashes(xls('Disabled')); ?></span>';
+                                                                }
+                                                                html += '</td>';
+                                                                html += '<td>';
+                                                                if (service.enabled) {
+                                                                    html += '<button class="btn btn-sm btn-warning" onclick="toggleCDSService(\'' + service.id + '\', false)"><?php echo addslashes(xls('Disable')); ?></button>';
+                                                                } else {
+                                                                    html += '<button class="btn btn-sm btn-success" onclick="toggleCDSService(\'' + service.id + '\', true)"><?php echo addslashes(xls('Enable')); ?></button>';
+                                                                }
+                                                                html += '</td>';
+                                                                html += '</tr>';
+                                                            });
+                                                            
+                                                            html += '</tbody></table></div>';
+                                                        }
+                                                        
+                                                        document.getElementById('cds_services_list').innerHTML = html;
+                                                    }
+
+                                                    function toggleCDSService(serviceId, enable) {
+                                                        console.log('toggleCDSService called:', serviceId, enable);
+                                                        
+                                                        const csrfToken = document.querySelector('input[name="csrf_token_form"]')?.value || '';
+                                                        
+                                                        fetch('cds_services_api.php', {
+                                                            method: 'POST',
+                                                            headers: {
+                                                                'Content-Type': 'application/x-www-form-urlencoded',
+                                                            },
+                                                            body: 'action=toggle_service&service_id=' + encodeURIComponent(serviceId) + '&enabled=' + (enable ? '1' : '0') + '&csrf_token=' + encodeURIComponent(csrfToken)
+                                                        })
+                                                        .then(response => response.json())
+                                                        .then(data => {
+                                                            console.log('Toggle service response:', data);
+                                                            if (data.success) {
+                                                                loadCDSServices();
+                                                            } else {
+                                                                alert('<?php echo addslashes(xls('Failed to update service:')); ?> ' + (data.error || ''));
+                                                            }
+                                                        })
+                                                        .catch(error => {
+                                                            console.error('Error:', error);
+                                                            alert('<?php echo addslashes(xls('Error updating service.')); ?>');
+                                                        });
+                                                    }
+                                                    
+                                                    // Load services on page load
+                                                    document.addEventListener('DOMContentLoaded', function() {
+                                                        console.log('DOM loaded, CDS Hooks functions ready');
+                                                    });
+                                                    </script>
+                                                    <?php
                                                 } else {
                                                     if ($userMode) {
                                                         $globalTitle = $globalValue;
