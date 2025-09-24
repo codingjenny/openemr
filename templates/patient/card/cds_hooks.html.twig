@@ -1,6 +1,29 @@
 {% extends "patient/card/card_base.html.twig" %}
 
 {% block content %}
+<style>
+.cds-card-detail {
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+.cds-card-detail .table {
+    margin-bottom: 0;
+}
+.cds-card-detail .table th,
+.cds-card-detail .table td {
+    padding: 0.5rem;
+    font-size: 0.8rem;
+    border-color: #e9ecef;
+}
+.cds-service-summary {
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+}
+.cds-service-summary .table thead th {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+}
+</style>
 <div class="list-group list-group-flush cds-cards">
     {% if cdsCards is empty %}
         <div class="list-group-item p-2 text-muted text-center">
@@ -24,7 +47,7 @@
                             {{ card.summary|text }}
                         </h6>
                         {% if card.detail %}
-                            <p class="mb-1 text-muted">{{ card.detail|text }}</p>
+                            <div class="mb-1 cds-card-detail">{{ card.detail|raw }}</div>
                         {% endif %}
                         {% if card.source and card.source.label %}
                             <small class="text-muted">

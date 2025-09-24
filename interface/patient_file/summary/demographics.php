@@ -104,8 +104,29 @@ if ($cdsEnabled) {
         $cdsHookService = new \OpenEMR\Services\CDSHookService();
         $cdsCards = $cdsHookService->triggerPatientView($pid);
         error_log("CDS Hook: demographics.php received " . count($cdsCards) . " cards");
+        
+        // 添加前端 JavaScript 日誌
+        echo "<!-- CDS Hooks Integration -->\n";
+        echo "<script>\n";
+        echo "console.group('CDS Hooks Patient View - Demographics');\n";
+        echo "console.log('CDS Hooks enabled:', " . ($cdsEnabled ? 'true' : 'false') . ");\n";
+        echo "console.log('Patient ID:', '" . addslashes($pid) . "');\n";
+        echo "console.log('Cards received:', " . count($cdsCards) . ");\n";
+        
+        if (!empty($cdsCards)) {
+            foreach ($cdsCards as $index => $card) {
+                $cardJson = json_encode($card);
+                echo "console.log('Card " . ($index + 1) . ":', " . $cardJson . ");\n";
+            }
+        }
+        
+        echo "console.groupEnd();\n";
+        echo "</script>\n";
+        echo "<!-- End CDS Hooks Integration -->\n";
+        
     } catch (Exception $e) {
         error_log("CDS Hook error: " . $e->getMessage());
+        echo "<script>console.error('CDS Hook error:', '" . addslashes($e->getMessage()) . "');</script>\n";
     }
 }
 

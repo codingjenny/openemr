@@ -3,6 +3,7 @@
 namespace OpenEMR\Services;
 
 use OpenEMR\Services\PatientService;
+use Exception;
 
 class CDSHookService extends BaseService
 {
@@ -47,15 +48,53 @@ class CDSHookService extends BaseService
         error_log("CDS Hook: Found " . count($enabledServices) . " enabled patient-view services");
         
         $cdsCards = [];
+        $serviceResults = [];
+        $debugMode = ($GLOBALS['cds_hooks_debug'] ?? false);
         
         foreach ($enabledServices as $service) {
             error_log("CDS Hook: Calling service: " . $service['service_id']);
-            $cards = $this->callCDSService($service, $patient);
-            error_log("CDS Hook: Service " . $service['service_id'] . " returned " . count($cards) . " cards");
+            $startTime = microtime(true);
+            $callResult = $this->callCDSService($service, $patient);
+            $endTime = microtime(true);
+            $duration = round(($endTime - $startTime) * 1000, 2);
+            
+            // AI Generated fix: Distinguish between service failure and empty cards
+            // A service is successful if it returns an array (even empty), failed if it returns null or false
+            $success = ($callResult !== null && is_array($callResult));
+            $cards = $success ? $callResult : [];
+            
+            $serviceResult = [
+                'service_id' => $service['service_id'],
+                'title' => $service['title'] ?? $service['service_id'],
+                'url' => $service['url'],
+                'success' => $success,
+                'card_count' => count($cards),
+                'duration_ms' => $duration
+            ];
+            
+            // 詳細日誌只在調試模式下記錄
+            if ($debugMode) {
+                error_log("CDS Hook: Service " . $service['service_id'] . " returned " . count($cards) . " cards in {$duration}ms");
+            }
+            
+            $serviceResults[] = $serviceResult;
             $cdsCards = array_merge($cdsCards, $cards);
         }
         
-        error_log("CDS Hook: Total cards returned: " . count($cdsCards));
+        // 只在調試模式下添加服務執行摘要
+        $debugMode = ($GLOBALS['cds_hooks_debug'] ?? false);
+        if (!empty($serviceResults) && $debugMode) {
+            $summaryCard = [
+                'uuid' => 'service-summary-' . uniqid(),
+                'summary' => 'CDS Services Execution Summary (Debug Mode)',
+                'source' => ['label' => 'OpenEMR CDS Hook Debug'],
+                'indicator' => 'info',
+                'detail' => $this->generateServiceSummaryHTML($serviceResults)
+            ];
+            array_unshift($cdsCards, $summaryCard);
+        }
+        
+        error_log("CDS Hook: Total cards returned: " . count($cdsCards) . " (including summary)");
         return $cdsCards;
     }
 
@@ -190,17 +229,51 @@ class CDSHookService extends BaseService
 
     /**
      * 調用 CDS Hook 服務
+     * AI Generated fix: Changed return type to ?array to distinguish success/failure
      */
-    private function callCDSService(array $service, array $patient): array
+    private function callCDSService(array $service, array $patient): ?array
     {
         // 使用真實的資料庫資料，但修復 UUID 格式問題
         $patientUuid = $this->convertUuidToString($patient['uuid'] ?? '1');
+        $patientId = $patient['pid'] ?? 1;
         
         // 使用真實的患者資料
         $patientFirstName = $patient['fname'] ?? 'John';
         $patientLastName = $patient['lname'] ?? 'Doe';
         $patientBirthDate = $patient['DOB'] ?? '1980-01-01';
         $patientGender = strtolower($patient['sex'] ?? 'male');
+        
+        // 構建基本 prefetch 資源
+        // AI Generated fix: Use service-specific key format based on discovery info
+        $servicePrefetch = $this->getServicePrefetchRequirements($service['service_id']);
+        
+        // 確定患者資源的正確 key 名稱（有些服務用小寫 patient，有些用大寫 Patient）
+        $patientKey = isset($servicePrefetch['patient']) ? 'patient' : 'Patient';
+        
+        $prefetch = [
+            $patientKey => [
+                'resourceType' => 'Patient',
+                'id' => $patientUuid,
+                'active' => true,
+                'name' => [[
+                    'use' => 'official',
+                    'family' => $patientLastName,
+                    'given' => [$patientFirstName]
+                ]],
+                'birthDate' => $patientBirthDate,
+                'gender' => $patientGender
+            ]
+        ];
+
+        // 根據服務的 prefetch 要求添加額外資源
+        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+            error_log("CDS Hook Debug: Building prefetch resources for service {$service['service_id']}");
+        }
+        $prefetch = $this->buildPrefetchResources($service, $patientId, $patientUuid, $prefetch, $servicePrefetch);
+        
+        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+            error_log("CDS Hook Debug: Final prefetch resources: " . json_encode(array_keys($prefetch)));
+        }
         
         $cdsRequest = [
             'hook' => $service['hook'],
@@ -211,19 +284,7 @@ class CDSHookService extends BaseService
             'context' => [
                 'patientId' => $patientUuid
             ],
-            'prefetch' => [
-                'patient' => [
-                    'resourceType' => 'Patient',
-                    'id' => $patientUuid,
-                    'name' => [[
-                        'use' => 'official',
-                        'family' => $patientLastName,
-                        'given' => [$patientFirstName]
-                    ]],
-                    'birthDate' => $patientBirthDate,
-                    'gender' => $patientGender
-                ]
-            ]
+            'prefetch' => $prefetch
         ];
 
         // 使用配置的超時設定
@@ -232,10 +293,11 @@ class CDSHookService extends BaseService
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $service['url']);
         curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($cdsRequest));
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($cdsRequest, JSON_UNESCAPED_SLASHES));
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json',
-            'Accept: application/json'
+            'Accept: application/json',
+            'User-Agent: OpenEMR/7.0.0 CDS-Hooks-Client/1.0'
         ]);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
@@ -258,20 +320,49 @@ class CDSHookService extends BaseService
 
         if ($curlError) {
             error_log("CDS Hook cURL Error for service {$service['service_id']}: " . $curlError);
-            return [];
+            return null; // AI Generated fix: Return null for real failures
         }
 
         if ($httpCode === 200) {
             $data = json_decode($response, true);
             if (json_last_error() !== JSON_ERROR_NONE) {
                 error_log("CDS Hook JSON decode error for service {$service['service_id']}: " . json_last_error_msg());
-                return [];
+                return null; // AI Generated fix: Return null for JSON decode failures
             }
-            return $data['cards'] ?? [];
+            $cards = $data['cards'] ?? [];
+            error_log("CDS Hook SUCCESS for service {$service['service_id']}: received " . count($cards) . " cards");
+            return $cards; // Return empty array [] for successful response with no cards
         }
 
-        error_log("CDS Hook failed for service {$service['service_id']} with HTTP code: $httpCode, Response: $response");
-        return [];
+        // 記錄失敗的詳細信息
+        $errorMsg = "CDS Hook FAILED for service {$service['service_id']}:";
+        $errorMsg .= "\n  - HTTP Code: $httpCode";
+        $errorMsg .= "\n  - URL: {$service['url']}";
+        $errorMsg .= "\n  - Response: " . substr($response, 0, 200) . (strlen($response) > 200 ? '...' : '');
+        
+        if ($curlError) {
+            $errorMsg .= "\n  - cURL Error: $curlError";
+        }
+        
+        // 根據 HTTP 狀態碼提供更具體的錯誤說明
+        switch ($httpCode) {
+            case 412:
+                $errorMsg .= "\n  - Note: HTTP 412 (Precondition Failed) - The service rejected the request format or content";
+                // 在調試模式下輸出完整的請求內容
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    $errorMsg .= "\n  - Request JSON: " . json_encode($cdsRequest, JSON_PRETTY_PRINT);
+                }
+                break;
+            case 404:
+                $errorMsg .= "\n  - Note: HTTP 404 (Not Found) - Service endpoint not found";
+                break;
+            case 500:
+                $errorMsg .= "\n  - Note: HTTP 500 (Internal Server Error) - Service encountered an internal error";
+                break;
+        }
+        
+        error_log($errorMsg);
+        return null; // AI Generated fix: Return null for HTTP failures
     }
 
     /**
@@ -302,17 +393,571 @@ class CDSHookService extends BaseService
      */
     private function formatPatientForFHIR(array $patient, string $patientUuid): array
     {
-        return [
+        $patientResource = [
             'resourceType' => 'Patient',
             'id' => $patientUuid,
+            'meta' => [
+                'profile' => ['http://hl7.org/fhir/StructureDefinition/Patient']
+            ],
+            'active' => true,
             'name' => [[
                 'use' => 'official',
                 'family' => $patient['lname'] ?? '',
-                'given' => [$patient['fname'] ?? '']
-            ]],
-            'birthDate' => $patient['DOB'] ?? '',
-            'gender' => strtolower($patient['sex'] ?? 'unknown')
+                'given' => array_filter([$patient['fname'] ?? '', $patient['mname'] ?? ''])
+            ]]
+        ];
+        
+        if (!empty($patient['DOB'])) {
+            $patientResource['birthDate'] = $patient['DOB'];
+        }
+        
+        if (!empty($patient['sex'])) {
+            $gender = strtolower($patient['sex']);
+            // 確保性別符合FHIR標準
+            $validGenders = ['male', 'female', 'other', 'unknown'];
+            $patientResource['gender'] = in_array($gender, $validGenders) ? $gender : 'unknown';
+        }
+        
+        return $patientResource;
+    }
+
+    /**
+     * 生成服務執行摘要的 HTML
+     */
+    private function generateServiceSummaryHTML(array $serviceResults): string
+    {
+        $html = '<div class="cds-service-summary" style="background-color: #f8f9fa; border: 1px solid #17a2b8; border-radius: 8px; padding: 15px; margin: 10px 0;">';
+        $html .= '<div class="d-flex align-items-center mb-3">';
+        $html .= '<h6 class="mb-0" style="color: #495057;">🔧 CDS Services Execution Details</h6>';
+        $html .= '<span class="badge badge-info ml-2" style="font-size: 0.7rem;">DEBUG MODE</span>';
+        $html .= '</div>';
+        $html .= '<small class="text-muted d-block mb-3">此資訊僅在啟用調試模式時顯示，用於開發和故障排除。</small>';
+        
+        // 統計信息
+        $totalServices = count($serviceResults);
+        $successCount = 0;
+        $failedCount = 0;
+        
+        foreach ($serviceResults as $result) {
+            if ($result['success']) {
+                $successCount++;
+            } else {
+                $failedCount++;
+            }
+        }
+        
+        // 摘要統計
+        $html .= '<div class="row mb-3">';
+        $html .= '<div class="col-3"><small class="text-muted">總計:</small> <strong>' . $totalServices . '</strong></div>';
+        $html .= '<div class="col-3"><small class="text-success">成功:</small> <strong class="text-success">' . $successCount . '</strong></div>';
+        $html .= '<div class="col-3"><small class="text-warning">失敗:</small> <strong class="text-warning">' . $failedCount . '</strong></div>';
+        $html .= '<div class="col-3"><small class="text-muted">成功率:</small> <strong>' . round($successCount / $totalServices * 100, 1) . '%</strong></div>';
+        $html .= '</div>';
+        
+        // 服務詳情表格
+        $html .= '<div class="table-responsive">';
+        $html .= '<table class="table table-sm table-striped mb-0" style="font-size: 0.85rem;">';
+        $html .= '<thead class="thead-light"><tr>';
+        $html .= '<th style="border-top: none;">Service</th>';
+        $html .= '<th style="border-top: none;">Status</th>';
+        $html .= '<th style="border-top: none;">Cards</th>';
+        $html .= '<th style="border-top: none;">Time</th>';
+        $html .= '</tr></thead>';
+        $html .= '<tbody>';
+        
+        foreach ($serviceResults as $result) {
+            $statusClass = $result['success'] ? 'text-success' : 'text-warning';
+            $statusIcon = $result['success'] ? '✓' : '⚠️';
+            $statusText = $result['success'] ? 'Success' : 'Failed';
+            
+            $html .= '<tr>';
+            $html .= '<td>';
+            $html .= '<strong style="font-size: 0.9rem;">' . htmlspecialchars($result['service_id']) . '</strong>';
+            if ($result['title'] !== $result['service_id']) {
+                $html .= '<br><small class="text-muted">' . htmlspecialchars($result['title']) . '</small>';
+            }
+            $html .= '</td>';
+            $html .= '<td><span class="' . $statusClass . '">' . $statusIcon . ' ' . $statusText . '</span></td>';
+            $html .= '<td><span class="badge badge-' . ($result['card_count'] > 0 ? 'primary' : 'secondary') . '">' . $result['card_count'] . '</span></td>';
+            $html .= '<td><small>' . $result['duration_ms'] . 'ms</small></td>';
+            $html .= '</tr>';
+        }
+        
+        $html .= '</tbody></table>';
+        $html .= '</div>';
+        
+        // 展開/收縮按鈕
+        $html .= '<div class="mt-2 text-center">';
+        $html .= '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleCDSDetails(this)">';
+        $html .= '<i class="fas fa-chevron-down"></i> <span>詳細資訊</span>';
+        $html .= '</button>';
+        $html .= '</div>';
+        
+        // 詳細信息（默認隱藏）
+        $html .= '<div class="cds-detailed-info" style="display: none; margin-top: 15px; padding-top: 15px; border-top: 1px solid #dee2e6;">';
+        foreach ($serviceResults as $result) {
+            $html .= '<div class="mb-2">';
+            $html .= '<strong>' . htmlspecialchars($result['service_id']) . ':</strong> ';
+            $html .= '<small class="text-muted">' . htmlspecialchars($result['url']) . '</small>';
+            $html .= '</div>';
+        }
+        $html .= '</div>';
+        
+        $html .= '</div>';
+        
+        // 添加 JavaScript
+        $html .= '<script>';
+        $html .= 'function toggleCDSDetails(btn) {';
+        $html .= '  const details = btn.parentElement.nextElementSibling;';
+        $html .= '  const icon = btn.querySelector("i");';
+        $html .= '  const text = btn.querySelector("span");';
+        $html .= '  if (details.style.display === "none") {';
+        $html .= '    details.style.display = "block";';
+        $html .= '    icon.className = "fas fa-chevron-up";';
+        $html .= '    text.textContent = "隱藏詳細";';
+        $html .= '  } else {';
+        $html .= '    details.style.display = "none";';
+        $html .= '    icon.className = "fas fa-chevron-down";';
+        $html .= '    text.textContent = "詳細資訊";';
+        $html .= '  }';
+        $html .= '}';
+        
+        // 控制台輸出
+        $html .= 'console.group("🔧 CDS Hooks Service Execution Summary");';
+        $html .= 'console.log("Total services executed: ' . $totalServices . '");';
+        $html .= 'console.log("Successful services: ' . $successCount . '");';
+        $html .= 'console.log("Failed services: ' . $failedCount . '");';
+        
+        foreach ($serviceResults as $result) {
+            $jsResult = json_encode($result);
+            $statusEmoji = $result['success'] ? '✅' : '⚠️';
+            $html .= 'console.log("' . $statusEmoji . ' Service: ' . addslashes($result['service_id']) . '", ' . $jsResult . ');';
+        }
+        $html .= 'console.groupEnd();';
+        $html .= '</script>';
+        
+        return $html;
+    }
+
+    /**
+     * 根據服務要求構建 prefetch 資源
+     * AI-generated method by GitHub Copilot
+     */
+    /* BEGIN AI-generated code by GitHub Copilot */
+    private function buildPrefetchResources(array $service, int $patientId, string $patientUuid, array $basePrefetch, array $servicePrefetch): array
+    {
+        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+            error_log("CDS Hook Debug: Service {$service['service_id']} prefetch requirements: " . json_encode($servicePrefetch));
+        }
+        
+        $prefetch = $basePrefetch;
+        
+        // 根據 prefetch 要求添加資源
+        // AI Generated fix: Use service-specific key format based on discovery info
+        
+        // 檢查每種資源類型，支援大小寫兩種格式
+        foreach (['Condition', 'condition'] as $conditionKey) {
+            if (isset($servicePrefetch[$conditionKey])) {
+                $conditions = $this->getPatientConditions($patientId, $patientUuid);
+                $prefetch[$conditionKey] = $this->createBundle('conditions', $conditions, $patientUuid);
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Added " . count($conditions) . " conditions for patient $patientId");
+                }
+                break;
+            }
+        }
+        
+        foreach (['Observation', 'observation'] as $observationKey) {
+            if (isset($servicePrefetch[$observationKey])) {
+                $observations = $this->getPatientObservations($patientId, $patientUuid);
+                $prefetch[$observationKey] = $this->createBundle('observations', $observations, $patientUuid);
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Added " . count($observations) . " observations for patient $patientId");
+                }
+                break;
+            }
+        }
+        
+        foreach (['Encounter', 'encounter'] as $encounterKey) {
+            if (isset($servicePrefetch[$encounterKey])) {
+                $encounters = $this->getPatientEncounters($patientId, $patientUuid);
+                $prefetch[$encounterKey] = $this->createBundle('encounters', $encounters, $patientUuid);
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Added " . count($encounters) . " encounters for patient $patientId");
+                }
+                break;
+            }
+        }
+        
+        foreach (['Procedure', 'procedure'] as $procedureKey) {
+            if (isset($servicePrefetch[$procedureKey])) {
+                $procedures = $this->getPatientProcedures($patientId, $patientUuid);
+                $prefetch[$procedureKey] = $this->createBundle('procedures', $procedures, $patientUuid);
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Added " . count($procedures) . " procedures for patient $patientId");
+                }
+                break;
+            }
+        }
+        
+        foreach (['FamilyMemberHistory', 'familyMemberHistory'] as $familyKey) {
+            if (isset($servicePrefetch[$familyKey])) {
+                $familyHistory = $this->getPatientFamilyHistory($patientId, $patientUuid);
+                $prefetch[$familyKey] = $this->createBundle('familyhistory', $familyHistory, $patientUuid);
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Added " . count($familyHistory) . " family history items for patient $patientId");
+                }
+                break;
+            }
+        }
+        
+        return $prefetch;
+    }
+
+    /**
+     * 獲取服務的 prefetch 要求
+     * AI Generated fix: Added support for different key formats per service
+     */
+    private function getServicePrefetchRequirements(string $serviceId): array
+    {
+        // 從 Discovery 服務獲取的 prefetch 要求
+        $knownPrefetch = [
+            // Sandbox services use lowercase keys
+            'patient-greeting' => [
+                'patient' => 'Patient/{{context.patientId}}'
+            ],
+            '09139C' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
+            ],
+            '13026C' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}'
+            ],
+            '17022B' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Encounter' => 'Encounter?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
+            ],
+            '26074C' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}'
+            ],
+            '36014B' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}'
+            ],
+            '37048B' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Procedure' => 'Procedure?patient={{context.patientId}}'
+            ],
+            '80033B' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Procedure' => 'Procedure?patient={{context.patientId}}'
+            ],
+            'USPSTFPrediabetesAndType2DiabetesPart1ScreeningFHIRv401' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'FamilyMemberHistory' => 'FamilyMemberHistory?patient={{context.patientId}}'
+            ]
+        ];
+        
+        return $knownPrefetch[$serviceId] ?? [];
+    }
+
+    /**
+     * 獲取患者的 Condition 資源
+     */
+    private function getPatientConditions(int $patientId, string $patientUuid): array
+    {
+        try {
+            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'medical_problem' AND begdate IS NOT NULL ORDER BY begdate DESC LIMIT 10";
+            $result = sqlStatement($query, [$patientId]);
+            
+            $conditions = [];
+            while ($row = sqlFetchArray($result)) {
+                $condition = [
+                    'resourceType' => 'Condition',
+                    'id' => 'condition-' . $row['id'],
+                    'meta' => [
+                        'profile' => ['http://hl7.org/fhir/StructureDefinition/Condition']
+                    ],
+                    'subject' => ['reference' => 'Patient/' . $patientUuid],
+                    'code' => [
+                        'coding' => [
+                            [
+                                'system' => 'http://snomed.info/sct',
+                                'display' => $row['title'] ?? 'Unknown condition'
+                            ]
+                        ],
+                        'text' => $row['title'] ?? 'Unknown condition'
+                    ],
+                    'clinicalStatus' => [
+                        'coding' => [
+                            [
+                                'system' => 'http://terminology.hl7.org/CodeSystem/condition-clinical',
+                                'code' => 'active',
+                                'display' => 'Active'
+                            ]
+                        ]
+                    ],
+                    'verificationStatus' => [
+                        'coding' => [
+                            [
+                                'system' => 'http://terminology.hl7.org/CodeSystem/condition-ver-status',
+                                'code' => 'confirmed',
+                                'display' => 'Confirmed'
+                            ]
+                        ]
+                    ]
+                ];
+                
+                if (!empty($row['begdate'])) {
+                    $condition['onsetDateTime'] = $row['begdate'];
+                }
+                
+                $conditions[] = $condition;
+            }
+            
+            return $conditions;
+        } catch (Exception $e) {
+            error_log("Error fetching patient conditions: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * 獲取患者的 Observation 資源
+     */
+    private function getPatientObservations(int $patientId, string $patientUuid): array
+    {
+        try {
+            $query = "SELECT * FROM form_vitals WHERE pid = ? ORDER BY date DESC LIMIT 10";
+            $result = sqlStatement($query, [$patientId]);
+            
+            $observations = [];
+            while ($row = sqlFetchArray($result)) {
+                if (!empty($row['bps'])) {
+                    $observation = [
+                        'resourceType' => 'Observation',
+                        'id' => 'vitals-bp-' . $row['id'],
+                        'meta' => [
+                            'profile' => ['http://hl7.org/fhir/StructureDefinition/Observation']
+                        ],
+                        'status' => 'final',
+                        'category' => [
+                            [
+                                'coding' => [
+                                    [
+                                        'system' => 'http://terminology.hl7.org/CodeSystem/observation-category',
+                                        'code' => 'vital-signs',
+                                        'display' => 'Vital Signs'
+                                    ]
+                                ]
+                            ]
+                        ],
+                        'subject' => ['reference' => 'Patient/' . $patientUuid],
+                        'code' => [
+                            'coding' => [
+                                [
+                                    'system' => 'http://loinc.org',
+                                    'code' => '85354-9',
+                                    'display' => 'Blood pressure systolic and diastolic'
+                                ]
+                            ],
+                            'text' => 'Blood pressure'
+                        ],
+                        'component' => [
+                            [
+                                'code' => [
+                                    'coding' => [
+                                        [
+                                            'system' => 'http://loinc.org',
+                                            'code' => '8480-6',
+                                            'display' => 'Systolic blood pressure'
+                                        ]
+                                    ]
+                                ],
+                                'valueQuantity' => [
+                                    'value' => floatval($row['bps']),
+                                    'unit' => 'mmHg',
+                                    'system' => 'http://unitsofmeasure.org',
+                                    'code' => 'mm[Hg]'
+                                ]
+                            ]
+                        ]
+                    ];
+                    
+                    if (!empty($row['date'])) {
+                        $observation['effectiveDateTime'] = $row['date'];
+                    }
+                    
+                    if (!empty($row['bpd'])) {
+                        $observation['component'][] = [
+                            'code' => [
+                                'coding' => [
+                                    [
+                                        'system' => 'http://loinc.org',
+                                        'code' => '8462-4',
+                                        'display' => 'Diastolic blood pressure'
+                                    ]
+                                ]
+                            ],
+                            'valueQuantity' => [
+                                'value' => floatval($row['bpd']),
+                                'unit' => 'mmHg',
+                                'system' => 'http://unitsofmeasure.org',
+                                'code' => 'mm[Hg]'
+                            ]
+                        ];
+                    }
+                    
+                    $observations[] = $observation;
+                }
+            }
+            
+            return $observations;
+        } catch (Exception $e) {
+            error_log("Error fetching patient observations: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * 獲取患者的 Encounter 資源
+     */
+    private function getPatientEncounters(int $patientId, string $patientUuid): array
+    {
+        try {
+            $query = "SELECT * FROM form_encounter WHERE pid = ? ORDER BY date DESC LIMIT 10";
+            $result = sqlStatement($query, [$patientId]);
+            
+            $encounters = [];
+            while ($row = sqlFetchArray($result)) {
+                $encounter = [
+                    'resourceType' => 'Encounter',
+                    'id' => 'encounter-' . $row['id'],
+                    'meta' => [
+                        'profile' => ['http://hl7.org/fhir/StructureDefinition/Encounter']
+                    ],
+                    'status' => 'finished',
+                    'class' => [
+                        'system' => 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+                        'code' => 'AMB',
+                        'display' => 'ambulatory'
+                    ],
+                    'subject' => ['reference' => 'Patient/' . $patientUuid],
+                    'type' => [
+                        [
+                            'coding' => [
+                                [
+                                    'system' => 'http://snomed.info/sct',
+                                    'code' => '185349003',
+                                    'display' => 'Encounter for check up (procedure)'
+                                ]
+                            ]
+                        ]
+                    ]
+                ];
+                
+                if (!empty($row['date'])) {
+                    $encounter['period'] = [
+                        'start' => $row['date']
+                    ];
+                }
+                
+                $encounters[] = $encounter;
+            }
+            
+            return $encounters;
+        } catch (Exception $e) {
+            error_log("Error fetching patient encounters: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * 獲取患者的 Procedure 資源
+     */
+    private function getPatientProcedures(int $patientId, string $patientUuid): array
+    {
+        try {
+            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'surgery' ORDER BY begdate DESC LIMIT 10";
+            $result = sqlStatement($query, [$patientId]);
+            
+            $procedures = [];
+            while ($row = sqlFetchArray($result)) {
+                $procedures[] = [
+                    'resourceType' => 'Procedure',
+                    'id' => 'procedure-' . $row['id'],
+                    'subject' => ['reference' => 'Patient/' . $patientUuid],
+                    'status' => 'completed',
+                    'code' => [
+                        'text' => $row['title'] ?? 'Unknown procedure'
+                    ],
+                    'performedDateTime' => $row['begdate'] ?? null
+                ];
+            }
+            
+            return $procedures;
+        } catch (Exception $e) {
+            error_log("Error fetching patient procedures: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * 獲取患者的家族病史資源
+     */
+    private function getPatientFamilyHistory(int $patientId, string $patientUuid): array
+    {
+        try {
+            $query = "SELECT * FROM history_data WHERE pid = ? ORDER BY date DESC LIMIT 5";
+            $result = sqlStatement($query, [$patientId]);
+            
+            $familyHistory = [];
+            while ($row = sqlFetchArray($result)) {
+                if (!empty($row['father']) || !empty($row['mother']) || !empty($row['siblings'])) {
+                    $familyHistory[] = [
+                        'resourceType' => 'FamilyMemberHistory',
+                        'id' => 'family-history-' . $row['id'],
+                        'patient' => ['reference' => 'Patient/' . $patientUuid],
+                        'status' => 'completed',
+                        'condition' => []
+                    ];
+                }
+            }
+            
+            return $familyHistory;
+        } catch (Exception $e) {
+            error_log("Error fetching patient family history: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * 創建 FHIR Bundle 來包裝資源
+     */
+    private function createBundle(string $type, array $resources, string $patientUuid): array
+    {
+        return [
+            'resourceType' => 'Bundle',
+            'id' => $type . '-' . $patientUuid,
+            'type' => 'searchset',
+            'total' => count($resources),
+            'entry' => array_map(function($resource) {
+                return [
+                    'resource' => $resource,
+                    'fullUrl' => 'urn:uuid:' . $resource['id']
+                ];
+            }, $resources)
         ];
     }
+    /* END AI-generated code by GitHub Copilot */
 }
 ?>
