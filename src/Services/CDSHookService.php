@@ -54,7 +54,11 @@ class CDSHookService extends BaseService
         foreach ($enabledServices as $service) {
             error_log("CDS Hook: Calling service: " . $service['service_id']);
             $startTime = microtime(true);
-            $callResult = $this->callCDSService($service, $patient);
+            
+            // AI Generated: Collect debug info including request JSON
+            $debugInfo = [];
+            $callResult = $this->callCDSService($service, $patient, $debugInfo);
+            
             $endTime = microtime(true);
             $duration = round(($endTime - $startTime) * 1000, 2);
             
@@ -71,6 +75,11 @@ class CDSHookService extends BaseService
                 'card_count' => count($cards),
                 'duration_ms' => $duration
             ];
+            
+            // AI Generated: Add debug info for console output
+            if ($debugMode && !empty($debugInfo)) {
+                $serviceResult['debug_info'] = $debugInfo;
+            }
             
             // 詳細日誌只在調試模式下記錄
             if ($debugMode) {
@@ -231,7 +240,7 @@ class CDSHookService extends BaseService
      * 調用 CDS Hook 服務
      * AI Generated fix: Changed return type to ?array to distinguish success/failure
      */
-    private function callCDSService(array $service, array $patient): ?array
+    private function callCDSService(array $service, array $patient, array &$debugInfo = null): ?array
     {
         // 使用真實的資料庫資料，但修復 UUID 格式問題
         $patientUuid = $this->convertUuidToString($patient['uuid'] ?? '1');
@@ -315,6 +324,17 @@ class CDSHookService extends BaseService
             error_log("CDS Hook Response (HTTP $httpCode): " . $response);
             if ($curlError) {
                 error_log("CDS Hook cURL Error: " . $curlError);
+            }
+            
+            // AI Generated: Collect debug info for console output
+            if ($debugInfo !== null) {
+                $debugInfo['request_url'] = $service['url'];
+                $debugInfo['request_json'] = $cdsRequest;
+                $debugInfo['response_http_code'] = $httpCode;
+                $debugInfo['response_body'] = $response;
+                if ($curlError) {
+                    $debugInfo['curl_error'] = $curlError;
+                }
             }
         }
 
@@ -496,9 +516,40 @@ class CDSHookService extends BaseService
         // 詳細信息（默認隱藏）
         $html .= '<div class="cds-detailed-info" style="display: none; margin-top: 15px; padding-top: 15px; border-top: 1px solid #dee2e6;">';
         foreach ($serviceResults as $result) {
-            $html .= '<div class="mb-2">';
+            $html .= '<div class="mb-3 p-2" style="background-color: #f1f3f4; border-radius: 4px;">';
             $html .= '<strong>' . htmlspecialchars($result['service_id']) . ':</strong> ';
             $html .= '<small class="text-muted">' . htmlspecialchars($result['url']) . '</small>';
+            
+            // AI Generated: Add debug info display and console output
+            if (isset($result['debug_info'])) {
+                $debugInfo = $result['debug_info'];
+                $serviceId = $result['service_id'];
+                
+                $html .= '<div class="mt-2">';
+                $html .= '<button type="button" class="btn btn-xs btn-outline-info" onclick="logCDSRequest(\'' . $serviceId . '\')">';
+                $html .= '<i class="fas fa-code"></i> 輸出 Request JSON 到 Console';
+                $html .= '</button>';
+                $html .= '</div>';
+                
+                // Add JavaScript to output request JSON to console
+                $html .= '<script>';
+                $html .= 'window.cdsDebugInfo = window.cdsDebugInfo || {};';
+                $html .= 'window.cdsDebugInfo["' . $serviceId . '"] = ' . json_encode($debugInfo) . ';';
+                $html .= 'function logCDSRequest(serviceId) {';
+                $html .= '  const info = window.cdsDebugInfo[serviceId];';
+                $html .= '  if (info) {';
+                $html .= '    console.group("CDS Hook Debug: " + serviceId);';
+                $html .= '    console.log("Request URL:", info.request_url);';
+                $html .= '    console.log("Request JSON:", info.request_json);';
+                $html .= '    console.log("Response HTTP Code:", info.response_http_code);';
+                $html .= '    console.log("Response Body:", info.response_body);';
+                $html .= '    if (info.curl_error) console.error("cURL Error:", info.curl_error);';
+                $html .= '    console.groupEnd();';
+                $html .= '  }';
+                $html .= '}';
+                $html .= '</script>';
+            }
+            
             $html .= '</div>';
         }
         $html .= '</div>';
@@ -689,12 +740,7 @@ class CDSHookService extends BaseService
                     ],
                     'subject' => ['reference' => 'Patient/' . $patientUuid],
                     'code' => [
-                        'coding' => [
-                            [
-                                'system' => 'http://snomed.info/sct',
-                                'display' => $row['title'] ?? 'Unknown condition'
-                            ]
-                        ],
+                        'coding' => $this->buildConditionCoding($row['diagnosis'], $row['title']),
                         'text' => $row['title'] ?? 'Unknown condition'
                     ],
                     'clinicalStatus' => [
@@ -737,11 +783,13 @@ class CDSHookService extends BaseService
     private function getPatientObservations(int $patientId, string $patientUuid): array
     {
         try {
-            $query = "SELECT * FROM form_vitals WHERE pid = ? ORDER BY date DESC LIMIT 10";
-            $result = sqlStatement($query, [$patientId]);
-            
             $observations = [];
-            while ($row = sqlFetchArray($result)) {
+            
+            // 獲取生命徵象資料
+            $vitalQuery = "SELECT * FROM form_vitals WHERE pid = ? ORDER BY date DESC LIMIT 10";
+            $vitalResult = sqlStatement($vitalQuery, [$patientId]);
+            
+            while ($row = sqlFetchArray($vitalResult)) {
                 if (!empty($row['bps'])) {
                     $observation = [
                         'resourceType' => 'Observation',
@@ -815,6 +863,75 @@ class CDSHookService extends BaseService
                                 'code' => 'mm[Hg]'
                             ]
                         ];
+                    }
+                    
+                    $observations[] = $observation;
+                }
+            }
+            
+            // 獲取實驗室檢查結果
+            $labQuery = "SELECT pr.*, rep.date_collected, rep.date_report, po.patient_id 
+                        FROM procedure_result pr 
+                        JOIN procedure_report rep ON pr.procedure_report_id = rep.procedure_report_id 
+                        JOIN procedure_order po ON rep.procedure_order_id = po.procedure_order_id 
+                        WHERE po.patient_id = ? AND pr.result != '' 
+                        ORDER BY rep.date_collected DESC LIMIT 20";
+            $labResult = sqlStatement($labQuery, [$patientId]);
+            
+            while ($row = sqlFetchArray($labResult)) {
+                if (!empty($row['result_code']) && !empty($row['result'])) {
+                    $observation = [
+                        'resourceType' => 'Observation',
+                        'id' => 'lab-' . $row['procedure_result_id'],
+                        'meta' => [
+                            'profile' => ['http://hl7.org/fhir/StructureDefinition/Observation']
+                        ],
+                        'status' => 'final',
+                        'category' => [
+                            [
+                                'coding' => [
+                                    [
+                                        'system' => 'http://terminology.hl7.org/CodeSystem/observation-category',
+                                        'code' => 'laboratory',
+                                        'display' => 'Laboratory'
+                                    ]
+                                ]
+                            ]
+                        ],
+                        'subject' => ['reference' => 'Patient/' . $patientUuid],
+                        'code' => [
+                            'coding' => [
+                                [
+                                    'system' => 'http://loinc.org',
+                                    'code' => $row['result_code'],
+                                    'display' => $row['result_text'] ?? 'Laboratory test'
+                                ]
+                            ],
+                            'text' => $row['result_text'] ?? 'Laboratory test'
+                        ]
+                    ];
+                    
+                    // 設定結果值
+                    if (is_numeric($row['result'])) {
+                        $observation['valueQuantity'] = [
+                            'value' => floatval($row['result']),
+                            'unit' => $row['units'] ?? '',
+                            'system' => 'http://unitsofmeasure.org'
+                        ];
+                        if (!empty($row['units'])) {
+                            $observation['valueQuantity']['code'] = $row['units'];
+                        }
+                    } else {
+                        $observation['valueString'] = $row['result'];
+                    }
+                    
+                    // 設定檢查時間
+                    if (!empty($row['date_collected'])) {
+                        $observation['effectiveDateTime'] = $row['date_collected'];
+                    } elseif (!empty($row['date_report'])) {
+                        $observation['effectiveDateTime'] = $row['date_report'];
+                    } elseif (!empty($row['date'])) {
+                        $observation['effectiveDateTime'] = $row['date'];
                     }
                     
                     $observations[] = $observation;
@@ -957,6 +1074,66 @@ class CDSHookService extends BaseService
                 ];
             }, $resources)
         ];
+    }
+
+    /**
+     * 建立 Condition 的 coding 陣列，處理不同的診斷代碼系統
+     * AI-generated code by GitHub Copilot
+     */
+    private function buildConditionCoding($diagnosis, $title): array
+    {
+        $coding = [];
+        
+        if (!empty($diagnosis)) {
+            // 解析診斷代碼 (例如: "ICD10-CM:E08.22" 或 "SNOMED-CT:123456")
+            if (strpos($diagnosis, ':') !== false) {
+                list($system, $code) = explode(':', $diagnosis, 2);
+                
+                switch (strtoupper($system)) {
+                    case 'ICD10-CM':
+                    case 'ICD-10-CM':
+                        $coding[] = [
+                            'system' => 'http://hl7.org/fhir/sid/icd-10-cm',
+                            'code' => $code,
+                            'display' => $title ?? 'Unknown condition'
+                        ];
+                        break;
+                    case 'SNOMED-CT':
+                    case 'SNOMED':
+                        $coding[] = [
+                            'system' => 'http://snomed.info/sct',
+                            'code' => $code,
+                            'display' => $title ?? 'Unknown condition'
+                        ];
+                        break;
+                    default:
+                        // 未知系統，使用原始格式
+                        $coding[] = [
+                            'system' => 'http://terminology.hl7.org/CodeSystem/icd10',
+                            'code' => $code,
+                            'display' => $title ?? 'Unknown condition'
+                        ];
+                        break;
+                }
+            } else {
+                // 沒有系統前綴，假設是 ICD-10-CM
+                $coding[] = [
+                    'system' => 'http://hl7.org/fhir/sid/icd-10-cm',
+                    'code' => $diagnosis,
+                    'display' => $title ?? 'Unknown condition'
+                ];
+            }
+        }
+        
+        // 如果沒有找到有效的診斷代碼，使用 SNOMED 作為備用
+        if (empty($coding)) {
+            $coding[] = [
+                'system' => 'http://snomed.info/sct',
+                'display' => $title ?? 'Unknown condition'
+            ];
+        }
+        
+        return $coding;
     }
     /* END AI-generated code by GitHub Copilot */
 }
