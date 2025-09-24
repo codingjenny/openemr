@@ -123,6 +123,7 @@ $USER_SPECIFIC_TABS = array('Appearance',
     'Report',
     'Calendar',
     'CDR',
+    'CDS Hooks',
     'Connectors',
     'Questionnaires');
 $USER_SPECIFIC_GLOBALS = array('default_top_pane',
@@ -2783,6 +2784,47 @@ $GLOBALS_METADATA = array(
             '0',                              // default
             xl('Patient birthday alert requires turning off')
         )
+    ),
+
+    // CDS Hooks (Clinical Decision Support Hooks)
+    //
+    'CDS Hooks' => array(
+
+        'enable_cds_hooks' => array(
+            xl('Enable CDS Hooks'),
+            'bool',                           // data type
+            '0',                              // default
+            xl('Enable CDS (Clinical Decision Support) Hooks integration for external clinical decision support services')
+        ),
+
+        'cds_hooks_discovery_url' => array(
+            xl('CDS Hooks Discovery URL'),
+            'text',                           // data type
+            '',                               // default
+            xl('Discovery endpoint URL for CDS Hooks services (e.g., https://sandbox.cds-hooks.org/cds-services)')
+        ),
+
+        'cds_hooks_timeout' => array(
+            xl('CDS Hooks Timeout (seconds)'),
+            'num',                            // data type
+            '30',                             // default
+            xl('Timeout in seconds for CDS Hooks service requests')
+        ),
+
+        'cds_hooks_debug' => array(
+            xl('Enable CDS Hooks Debug Mode'),
+            'bool',                           // data type
+            '0',                              // default
+            xl('Enable debug logging for CDS Hooks requests and responses')
+        ),
+
+        'cds_hooks_services' => array(
+            xl('CDS Hooks Services Management'),
+            'cds_hooks_services',             // custom data type for service management
+            '',                               // default (not used for this type)
+            xl('Manage CDS Hooks service discovery and configuration. Use the buttons below to discover and configure available CDS Hooks services.')
+        ),
+
     ),
 
     // Logging

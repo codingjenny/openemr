@@ -96,7 +96,7 @@ $hiddenCards = getHiddenDashboardCards();
 
 // CDS Hook integration
 $cdsCards = [];
-$cdsEnabled = ($GLOBALS['enable_cds_hooks'] ?? false) || getGlobalSetting('enable_cds_hooks');
+$cdsEnabled = $GLOBALS['enable_cds_hooks'] ?? false;
 error_log("CDS Hook: enabled = " . ($cdsEnabled ? 'true' : 'false') . ", pid = $pid");
 
 if ($cdsEnabled) {
@@ -1287,7 +1287,7 @@ $oemr_ui = new OemrUI($arrOeUiSettings);
                             'forceAlwaysOpen' => false
                         ]);
                         echo "</div>";
-                    } elseif (($GLOBALS['enable_cds_hooks'] ?? false) || getGlobalSetting('enable_cds_hooks')) {
+                    } elseif ($GLOBALS['enable_cds_hooks'] ?? false) {
                         // Show settings link if CDS Hooks enabled but no cards
                         echo "<div class='mb-2'>";
                         echo "<div class='card'>";
