@@ -8,7 +8,7 @@ use Exception;
 class CDSHookService extends BaseService
 {
     /**
-     * Fallback hardcoded services for when database is not available
+     * 當資料庫不可用時的備用硬編碼服務
      */
     private array $fallbackServices = [
         'patient-greeting' => [
@@ -55,15 +55,15 @@ class CDSHookService extends BaseService
             error_log("CDS Hook: Calling service: " . $service['service_id']);
             $startTime = microtime(true);
             
-            // AI Generated: Collect debug info including request JSON
+            // AI 生成：收集調試信息包括請求 JSON
             $debugInfo = [];
             $callResult = $this->callCDSService($service, $patient, $debugInfo);
             
             $endTime = microtime(true);
             $duration = round(($endTime - $startTime) * 1000, 2);
             
-            // AI Generated fix: Distinguish between service failure and empty cards
-            // A service is successful if it returns an array (even empty), failed if it returns null or false
+            // AI 生成修復：區分服務失敗和空卡片
+            // 如果返回陣列（即使為空）則服務成功，返回 null 或 false 則失敗
             $success = ($callResult !== null && is_array($callResult));
             $cards = $success ? $callResult : [];
             
@@ -76,7 +76,7 @@ class CDSHookService extends BaseService
                 'duration_ms' => $duration
             ];
             
-            // AI Generated: Add debug info for console output
+            // AI 生成：為控制台輸出添加調試信息
             if ($debugMode && !empty($debugInfo)) {
                 $serviceResult['debug_info'] = $debugInfo;
             }
@@ -87,7 +87,20 @@ class CDSHookService extends BaseService
             }
             
             $serviceResults[] = $serviceResult;
-            $cdsCards = array_merge($cdsCards, $cards);
+            
+            // 🎯 為每個 card 添加健保點數資訊
+            foreach ($cards as &$card) {
+                $card = $this->enrichCardWithPaymentInfo($card, $service['service_id']);
+            }
+            
+            // 🎯 只有當服務返回了 cards 時，才合併到結果中
+            // 不再自動生成健保點數卡片，只顯示服務真正返回的內容
+            if ($success && count($cards) > 0) {
+                $cdsCards = array_merge($cdsCards, $cards);
+                error_log("CDS Hook: Service {$service['service_id']} contributed " . count($cards) . " cards");
+            } else {
+                error_log("CDS Hook: Service {$service['service_id']} returned no cards, skipping display");
+            }
         }
         
         // 只在調試模式下添加服務執行摘要
@@ -95,7 +108,7 @@ class CDSHookService extends BaseService
         if (!empty($serviceResults) && $debugMode) {
             $summaryCard = [
                 'uuid' => 'service-summary-' . uniqid(),
-                'summary' => 'CDS Services Execution Summary (Debug Mode)',
+                'summary' => 'CDS 服務執行摘要 (調試模式)',
                 'source' => ['label' => 'OpenEMR CDS Hook Debug'],
                 'indicator' => 'info',
                 'detail' => $this->generateServiceSummaryHTML($serviceResults)
@@ -103,7 +116,7 @@ class CDSHookService extends BaseService
             array_unshift($cdsCards, $summaryCard);
         }
         
-        error_log("CDS Hook: Total cards returned: " . count($cdsCards) . " (including summary)");
+        error_log("CDS Hook: Total cards displayed: " . count($cdsCards) . " (only showing services with actual cards)");
         return $cdsCards;
     }
 
@@ -218,8 +231,8 @@ class CDSHookService extends BaseService
                     'service_id' => $serviceId,
                     'url' => $service['url'],
                     'hook' => $service['hook'],
-                    'title' => 'Patient Greeting Service',
-                    'description' => 'A simple greeting service for patients'
+                    'title' => '病人問候服務',
+                    'description' => '為病人提供的簡單問候服務'
                 ];
             }
         }
@@ -238,7 +251,7 @@ class CDSHookService extends BaseService
 
     /**
      * 調用 CDS Hook 服務
-     * AI Generated fix: Changed return type to ?array to distinguish success/failure
+     * AI 生成修復：將返回類型改為 ?array 以區分成功/失敗
      */
     private function callCDSService(array $service, array $patient, array &$debugInfo = null): ?array
     {
@@ -253,7 +266,7 @@ class CDSHookService extends BaseService
         $patientGender = strtolower($patient['sex'] ?? 'male');
         
         // 構建基本 prefetch 資源
-        // AI Generated fix: Use service-specific key format based on discovery info
+        // AI 生成修復：根據 discovery 資訊使用服務特定的 key 格式
         $servicePrefetch = $this->getServicePrefetchRequirements($service['service_id']);
         
         // 確定患者資源的正確 key 名稱（有些服務用小寫 patient，有些用大寫 Patient）
@@ -287,11 +300,11 @@ class CDSHookService extends BaseService
         $cdsRequest = [
             'hook' => $service['hook'],
             'hookInstance' => 'openemr-' . uniqid(),
-            'fhirServer' => 'https://localhost:9300/apis/default/fhir',
-            'user' => 'Practitioner/admin',
-            'patient' => 'Patient/' . $patientUuid,
+            'fhirServer' => 'http://example.org',
             'context' => [
-                'patientId' => $patientUuid
+                'userId' => 'Practitioner/admin',
+                'patientId' => (string)$patientId,
+                'encounterId' => 'encounter-' . $patientId
             ],
             'prefetch' => $prefetch
         ];
@@ -326,7 +339,7 @@ class CDSHookService extends BaseService
                 error_log("CDS Hook cURL Error: " . $curlError);
             }
             
-            // AI Generated: Collect debug info for console output
+            // AI 生成：為控制台輸出收集調試資訊
             if ($debugInfo !== null) {
                 $debugInfo['request_url'] = $service['url'];
                 $debugInfo['request_json'] = $cdsRequest;
@@ -340,18 +353,18 @@ class CDSHookService extends BaseService
 
         if ($curlError) {
             error_log("CDS Hook cURL Error for service {$service['service_id']}: " . $curlError);
-            return null; // AI Generated fix: Return null for real failures
+            return null; // AI 生成修復：真正失敗時返回 null
         }
 
         if ($httpCode === 200) {
             $data = json_decode($response, true);
             if (json_last_error() !== JSON_ERROR_NONE) {
                 error_log("CDS Hook JSON decode error for service {$service['service_id']}: " . json_last_error_msg());
-                return null; // AI Generated fix: Return null for JSON decode failures
+                return null; // AI 生成修復：JSON 解碼失敗時返回 null
             }
             $cards = $data['cards'] ?? [];
             error_log("CDS Hook SUCCESS for service {$service['service_id']}: received " . count($cards) . " cards");
-            return $cards; // Return empty array [] for successful response with no cards
+            return $cards; // 成功響應但沒有卡片時返回空陣列 []
         }
 
         // 記錄失敗的詳細信息
@@ -382,9 +395,28 @@ class CDSHookService extends BaseService
         }
         
         error_log($errorMsg);
-        return null; // AI Generated fix: Return null for HTTP failures
+        return null; // AI 生成修復：HTTP 失敗時返回 null
     }
 
+    /**
+     * 轉換日期為 FHIR ISO 8601 格式
+     */
+    private function convertToFHIRDateTime($dateTime): ?string
+    {
+        if (empty($dateTime)) {
+            return null;
+        }
+        
+        // 嘗試解析日期
+        $dt = date_create($dateTime);
+        if ($dt === false) {
+            return null;
+        }
+        
+        // 轉換為 ISO 8601 格式 (YYYY-MM-DDTHH:MM:SSZ)
+        return date_format($dt, 'Y-m-d\TH:i:s\Z');
+    }
+    
     /**
      * 轉換 UUID 為字串格式
      */
@@ -448,7 +480,7 @@ class CDSHookService extends BaseService
     {
         $html = '<div class="cds-service-summary" style="background-color: #f8f9fa; border: 1px solid #17a2b8; border-radius: 8px; padding: 15px; margin: 10px 0;">';
         $html .= '<div class="d-flex align-items-center mb-3">';
-        $html .= '<h6 class="mb-0" style="color: #495057;">🔧 CDS Services Execution Details</h6>';
+        $html .= '<h6 class="mb-0" style="color: #495057;">🔧 CDS 服務執行詳情</h6>';
         $html .= '<span class="badge badge-info ml-2" style="font-size: 0.7rem;">DEBUG MODE</span>';
         $html .= '</div>';
         $html .= '<small class="text-muted d-block mb-3">此資訊僅在啟用調試模式時顯示，用於開發和故障排除。</small>';
@@ -478,17 +510,17 @@ class CDSHookService extends BaseService
         $html .= '<div class="table-responsive">';
         $html .= '<table class="table table-sm table-striped mb-0" style="font-size: 0.85rem;">';
         $html .= '<thead class="thead-light"><tr>';
-        $html .= '<th style="border-top: none;">Service</th>';
-        $html .= '<th style="border-top: none;">Status</th>';
-        $html .= '<th style="border-top: none;">Cards</th>';
-        $html .= '<th style="border-top: none;">Time</th>';
+        $html .= '<th style="border-top: none;">服務</th>';
+        $html .= '<th style="border-top: none;">狀態</th>';
+        $html .= '<th style="border-top: none;">卡片</th>';
+        $html .= '<th style="border-top: none;">時間</th>';
         $html .= '</tr></thead>';
         $html .= '<tbody>';
         
         foreach ($serviceResults as $result) {
             $statusClass = $result['success'] ? 'text-success' : 'text-warning';
             $statusIcon = $result['success'] ? '✓' : '⚠️';
-            $statusText = $result['success'] ? 'Success' : 'Failed';
+            $statusText = $result['success'] ? '成功' : '失敗';
             
             $html .= '<tr>';
             $html .= '<td>';
@@ -520,7 +552,7 @@ class CDSHookService extends BaseService
             $html .= '<strong>' . htmlspecialchars($result['service_id']) . ':</strong> ';
             $html .= '<small class="text-muted">' . htmlspecialchars($result['url']) . '</small>';
             
-            // AI Generated: Add debug info display and console output
+            // AI 生成：添加調試信息顯示和控制台輸出
             if (isset($result['debug_info'])) {
                 $debugInfo = $result['debug_info'];
                 $serviceId = $result['service_id'];
@@ -574,15 +606,15 @@ class CDSHookService extends BaseService
         $html .= '}';
         
         // 控制台輸出
-        $html .= 'console.group("🔧 CDS Hooks Service Execution Summary");';
-        $html .= 'console.log("Total services executed: ' . $totalServices . '");';
-        $html .= 'console.log("Successful services: ' . $successCount . '");';
-        $html .= 'console.log("Failed services: ' . $failedCount . '");';
+        $html .= 'console.group("🔧 CDS Hooks 服務執行摘要");';
+        $html .= 'console.log("總計執行服務: ' . $totalServices . '");';
+        $html .= 'console.log("成功服務: ' . $successCount . '");';
+        $html .= 'console.log("失敗服務: ' . $failedCount . '");';
         
         foreach ($serviceResults as $result) {
             $jsResult = json_encode($result);
             $statusEmoji = $result['success'] ? '✅' : '⚠️';
-            $html .= 'console.log("' . $statusEmoji . ' Service: ' . addslashes($result['service_id']) . '", ' . $jsResult . ');';
+            $html .= 'console.log("' . $statusEmoji . ' 服務: ' . addslashes($result['service_id']) . '", ' . $jsResult . ');';
         }
         $html .= 'console.groupEnd();';
         $html .= '</script>';
@@ -592,9 +624,9 @@ class CDSHookService extends BaseService
 
     /**
      * 根據服務要求構建 prefetch 資源
-     * AI-generated method by GitHub Copilot
+     * AI 生成方法（由 GitHub Copilot 生成）
      */
-    /* BEGIN AI-generated code by GitHub Copilot */
+    /* 開始：AI 生成的程式碼（GitHub Copilot） */
     private function buildPrefetchResources(array $service, int $patientId, string $patientUuid, array $basePrefetch, array $servicePrefetch): array
     {
         if (($GLOBALS['cds_hooks_debug'] ?? false)) {
@@ -603,10 +635,10 @@ class CDSHookService extends BaseService
         
         $prefetch = $basePrefetch;
         
-        // 根據 prefetch 要求添加資源
-        // AI Generated fix: Use service-specific key format based on discovery info
+        // ✅ 修復：根據服務要求添加資源，檢查服務需要哪些資源
+        // 支援大小寫兩種格式（Condition 或 condition）
         
-        // 檢查每種資源類型，支援大小寫兩種格式
+        // Condition
         foreach (['Condition', 'condition'] as $conditionKey) {
             if (isset($servicePrefetch[$conditionKey])) {
                 $conditions = $this->getPatientConditions($patientId, $patientUuid);
@@ -618,6 +650,7 @@ class CDSHookService extends BaseService
             }
         }
         
+        // Observation
         foreach (['Observation', 'observation'] as $observationKey) {
             if (isset($servicePrefetch[$observationKey])) {
                 $observations = $this->getPatientObservations($patientId, $patientUuid);
@@ -629,6 +662,7 @@ class CDSHookService extends BaseService
             }
         }
         
+        // Encounter
         foreach (['Encounter', 'encounter'] as $encounterKey) {
             if (isset($servicePrefetch[$encounterKey])) {
                 $encounters = $this->getPatientEncounters($patientId, $patientUuid);
@@ -640,6 +674,7 @@ class CDSHookService extends BaseService
             }
         }
         
+        // Procedure
         foreach (['Procedure', 'procedure'] as $procedureKey) {
             if (isset($servicePrefetch[$procedureKey])) {
                 $procedures = $this->getPatientProcedures($patientId, $patientUuid);
@@ -651,6 +686,7 @@ class CDSHookService extends BaseService
             }
         }
         
+        // FamilyMemberHistory
         foreach (['FamilyMemberHistory', 'familyMemberHistory'] as $familyKey) {
             if (isset($servicePrefetch[$familyKey])) {
                 $familyHistory = $this->getPatientFamilyHistory($patientId, $patientUuid);
@@ -662,18 +698,45 @@ class CDSHookService extends BaseService
             }
         }
         
+        // ✅ 關鍵修復：始終添加這些標準資源（即使為空），避免 HTTP 412 錯誤
+        // 即使服務沒有在 prefetch 中明確要求，也應該包含這些空 Bundle
+        // 這是因為某些 CDS 服務可能會驗證請求結構的完整性
+        
+        // 確保 Procedure 存在（如果還沒添加）
+        if (!isset($prefetch['Procedure']) && !isset($prefetch['procedure'])) {
+            $prefetch['Procedure'] = $this->createBundle('procedures', [], $patientUuid);
+        }
+        
+        // 確保 Encounter 存在（如果還沒添加）
+        if (!isset($prefetch['Encounter']) && !isset($prefetch['encounter'])) {
+            $prefetch['Encounter'] = $this->createBundle('encounters', [], $patientUuid);
+        }
+        
+        // 始終添加 Medication 相關資源（OpenEMR 可能沒有這些資料）
+        if (!isset($prefetch['MedicationStatement']) && !isset($prefetch['medicationStatement'])) {
+            $prefetch['MedicationStatement'] = $this->createBundle('medicationstatement', [], $patientUuid);
+        }
+        
+        if (!isset($prefetch['MedicationRequest']) && !isset($prefetch['medicationRequest'])) {
+            $prefetch['MedicationRequest'] = $this->createBundle('medicationrequest', [], $patientUuid);
+        }
+        
+        if (!isset($prefetch['MedicationDispense']) && !isset($prefetch['medicationDispense'])) {
+            $prefetch['MedicationDispense'] = $this->createBundle('medicationdispense', [], $patientUuid);
+        }
+        
         return $prefetch;
     }
 
     /**
      * 獲取服務的 prefetch 要求
-     * AI Generated fix: Added support for different key formats per service
+     * AI 生成修復：添加對每個服務不同 key 格式的支援
      */
     private function getServicePrefetchRequirements(string $serviceId): array
     {
         // 從 Discovery 服務獲取的 prefetch 要求
         $knownPrefetch = [
-            // Sandbox services use lowercase keys
+            // Sandbox 服務使用小寫 key
             'patient-greeting' => [
                 'patient' => 'Patient/{{context.patientId}}'
             ],
@@ -684,7 +747,8 @@ class CDSHookService extends BaseService
             ],
             '13026C' => [
                 'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}'
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ],
             '17022B' => [
                 'Patient' => 'Patient/{{context.patientId}}',
@@ -694,27 +758,37 @@ class CDSHookService extends BaseService
             ],
             '26074C' => [
                 'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}'
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ],
             '36014B' => [
                 'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}'
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ],
             '37048B' => [
                 'Patient' => 'Patient/{{context.patientId}}',
                 'Condition' => 'Condition?patient={{context.patientId}}',
-                'Procedure' => 'Procedure?patient={{context.patientId}}'
+                'Procedure' => 'Procedure?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ],
             '80033B' => [
                 'Patient' => 'Patient/{{context.patientId}}',
                 'Condition' => 'Condition?patient={{context.patientId}}',
-                'Procedure' => 'Procedure?patient={{context.patientId}}'
+                'Procedure' => 'Procedure?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ],
             'USPSTFPrediabetesAndType2DiabetesPart1ScreeningFHIRv401' => [
                 'Patient' => 'Patient/{{context.patientId}}',
                 'Observation' => 'Observation?patient={{context.patientId}}',
                 'Condition' => 'Condition?patient={{context.patientId}}',
                 'FamilyMemberHistory' => 'FamilyMemberHistory?patient={{context.patientId}}'
+            ],
+            'statin' => [
+                'Patient' => 'Patient/{{context.patientId}}',
+                'Condition' => 'Condition?patient={{context.patientId}}',
+                'FamilyMemberHistory' => 'FamilyMemberHistory?patient={{context.patientId}}',
+                'Observation' => 'Observation?patient={{context.patientId}}'
             ]
         ];
         
@@ -764,7 +838,7 @@ class CDSHookService extends BaseService
                 ];
                 
                 if (!empty($row['begdate'])) {
-                    $condition['onsetDateTime'] = $row['begdate'];
+                    $condition['onsetDateTime'] = $this->convertToFHIRDateTime($row['begdate']);
                 }
                 
                 $conditions[] = $condition;
@@ -842,7 +916,7 @@ class CDSHookService extends BaseService
                     ];
                     
                     if (!empty($row['date'])) {
-                        $observation['effectiveDateTime'] = $row['date'];
+                        $observation['effectiveDateTime'] = $this->convertToFHIRDateTime($row['date']);
                     }
                     
                     if (!empty($row['bpd'])) {
@@ -927,11 +1001,11 @@ class CDSHookService extends BaseService
                     
                     // 設定檢查時間
                     if (!empty($row['date_collected'])) {
-                        $observation['effectiveDateTime'] = $row['date_collected'];
+                        $observation['effectiveDateTime'] = $this->convertToFHIRDateTime($row['date_collected']);
                     } elseif (!empty($row['date_report'])) {
-                        $observation['effectiveDateTime'] = $row['date_report'];
+                        $observation['effectiveDateTime'] = $this->convertToFHIRDateTime($row['date_report']);
                     } elseif (!empty($row['date'])) {
-                        $observation['effectiveDateTime'] = $row['date'];
+                        $observation['effectiveDateTime'] = $this->convertToFHIRDateTime($row['date']);
                     }
                     
                     $observations[] = $observation;
@@ -984,7 +1058,7 @@ class CDSHookService extends BaseService
                 
                 if (!empty($row['date'])) {
                     $encounter['period'] = [
-                        'start' => $row['date']
+                        'start' => $this->convertToFHIRDateTime($row['date'])
                     ];
                 }
                 
@@ -1017,7 +1091,7 @@ class CDSHookService extends BaseService
                     'code' => [
                         'text' => $row['title'] ?? 'Unknown procedure'
                     ],
-                    'performedDateTime' => $row['begdate'] ?? null
+                    'performedDateTime' => $this->convertToFHIRDateTime($row['begdate'] ?? null)
                 ];
             }
             
@@ -1078,7 +1152,7 @@ class CDSHookService extends BaseService
 
     /**
      * 建立 Condition 的 coding 陣列，處理不同的診斷代碼系統
-     * AI-generated code by GitHub Copilot
+     * AI 生成的程式碼（由 GitHub Copilot 生成）
      */
     private function buildConditionCoding($diagnosis, $title): array
     {
@@ -1135,6 +1209,52 @@ class CDSHookService extends BaseService
         
         return $coding;
     }
-    /* END AI-generated code by GitHub Copilot */
+    /* 結束：AI 生成的程式碼（GitHub Copilot） */
+    
+    /**
+     * 檢查服務 ID 是否為台灣健保代碼
+     */
+    private function isNHICode(string $serviceId): bool
+    {
+        // 台灣健保代碼格式：數字+字母（如 09139C, 17022B）
+        return preg_match('/^\d{5}[A-Z]$/', $serviceId) || 
+               preg_match('/^\d{4}[A-Z]$/', $serviceId);
+    }
+    
+    /**
+     * 為 CDS Card 添加健保給付點數資訊（簡化版）
+     * 只在 detail 中添加簡單的「健保給付XXX點」文字
+     */
+    private function enrichCardWithPaymentInfo(array $card, string $serviceId): array
+    {
+        // 簡化的健保代碼點數對照表
+        $paymentPoints = [
+            '09139C' => 200,
+            '09006C' => 150,
+            '17022B' => 748,
+            '13026C' => 800,
+            '26074C' => 15000,
+            '36014B' => 50000,
+            '37048B' => 25000,
+            '80033B' => 30000
+        ];
+        
+        // 如果 service_id 在點數對照表中，在 detail 末尾添加健保給付資訊
+        if (isset($paymentPoints[$serviceId])) {
+            $points = $paymentPoints[$serviceId];
+            $paymentText = "健保給付{$points}點";
+            
+            // 如果 card 已經有 detail，在末尾添加
+            if (!empty($card['detail'])) {
+                // 如果 detail 中還沒有健保給付資訊，才添加
+                if (strpos($card['detail'], '健保給付') === false) {
+                    $card['detail'] = $card['detail'] . "\n\n" . $paymentText;
+                }
+            }
+            // 如果沒有 detail，這裡不添加（保持 CDS 服務返回的原始格式）
+        }
+        
+        return $card;
+    }
 }
 ?>

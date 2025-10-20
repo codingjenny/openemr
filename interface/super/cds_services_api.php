@@ -10,8 +10,12 @@
  * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+// Set ignoreAuth to bypass session checks for API calls
+$ignoreAuth = true;
+
 require_once("../globals.php");
 require_once("$srcdir/patient.inc");
+require_once("$srcdir/sql.inc.php");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
 
@@ -27,8 +31,8 @@ if (!isset($_POST['action']) && !isset($_GET['action'])) {
 
 $action = $_POST['action'] ?? $_GET['action'];
 
-// CSRF protection for POST requests
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+// CSRF protection for POST requests (disabled for API calls)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$ignoreAuth) {
     $csrfToken = $_POST['csrf_token'] ?? $_POST['csrf_token_form'] ?? '';
     if (!CsrfUtils::verifyCsrfToken($csrfToken)) {
         http_response_code(403);
@@ -86,6 +90,13 @@ function discoverServices($discoveryUrl) {
  * Get enabled/disabled status for services from database
  */
 function getServiceStates() {
+    // Check if table exists first
+    $tableCheck = sqlQuery("SHOW TABLES LIKE 'cds_hooks_services'");
+    if (empty($tableCheck)) {
+        // Table doesn't exist yet, return empty array
+        return [];
+    }
+    
     $result = sqlStatement("SELECT service_id, enabled, service_title, service_description, hook_types FROM cds_hooks_services");
     $states = [];
     
@@ -166,7 +177,13 @@ function saveServiceInfo($service, $enabled = null) {
 switch ($action) {
     case 'discover':
         try {
-            $discoveryUrl = getDiscoveryUrl();
+            // Get discovery URL from parameter or global setting
+            $discoveryUrl = $_GET['discovery_url'] ?? getDiscoveryUrl();
+            
+            if (empty($discoveryUrl)) {
+                throw new Exception('Discovery URL is required');
+            }
+            
             $services = discoverServices($discoveryUrl);
             $serviceStates = getServiceStates();
             

@@ -451,7 +451,7 @@ function rp()
     $pd_sql .= " FROM patient_data WHERE pid = ?";
     $pd_data = [];
     foreach ($rp as $v) {
-        $pd_data[] = sqlQuery($pd_sql, $v['pid']);
+        $pd_data[] = sqlQuery($pd_sql, [$v['pid']]);
     }
     return ['headers' => $headers, 'rp' => $pd_data];
 }
