@@ -55,7 +55,7 @@ class CDSHookService extends BaseService
             error_log("CDS Hook: Calling service: " . $service['service_id']);
             $startTime = microtime(true);
             
-            // AI 生成：收集調試信息包括請求 JSON
+            // AI 生成：收集調試資訊包括請求 JSON
             $debugInfo = [];
             $callResult = $this->callCDSService($service, $patient, $debugInfo);
             
@@ -76,7 +76,7 @@ class CDSHookService extends BaseService
                 'duration_ms' => $duration
             ];
             
-            // AI 生成：為控制台輸出添加調試信息
+            // AI 生成：為控制台輸出添加調試資訊
             if ($debugMode && !empty($debugInfo)) {
                 $serviceResult['debug_info'] = $debugInfo;
             }
@@ -367,7 +367,7 @@ class CDSHookService extends BaseService
             return $cards; // 成功響應但沒有卡片時返回空陣列 []
         }
 
-        // 記錄失敗的詳細信息
+        // 記錄失敗的詳細資訊
         $errorMsg = "CDS Hook FAILED for service {$service['service_id']}:";
         $errorMsg .= "\n  - HTTP Code: $httpCode";
         $errorMsg .= "\n  - URL: {$service['url']}";
@@ -485,7 +485,7 @@ class CDSHookService extends BaseService
         $html .= '</div>';
         $html .= '<small class="text-muted d-block mb-3">此資訊僅在啟用調試模式時顯示，用於開發和故障排除。</small>';
         
-        // 統計信息
+        // 統計資訊
         $totalServices = count($serviceResults);
         $successCount = 0;
         $failedCount = 0;
@@ -545,14 +545,14 @@ class CDSHookService extends BaseService
         $html .= '</button>';
         $html .= '</div>';
         
-        // 詳細信息（默認隱藏）
+        // 詳細資訊（默認隱藏）
         $html .= '<div class="cds-detailed-info" style="display: none; margin-top: 15px; padding-top: 15px; border-top: 1px solid #dee2e6;">';
         foreach ($serviceResults as $result) {
             $html .= '<div class="mb-3 p-2" style="background-color: #f1f3f4; border-radius: 4px;">';
             $html .= '<strong>' . htmlspecialchars($result['service_id']) . ':</strong> ';
             $html .= '<small class="text-muted">' . htmlspecialchars($result['url']) . '</small>';
             
-            // AI 生成：添加調試信息顯示和控制台輸出
+            // AI 生成：添加調試資訊顯示和控制台輸出
             if (isset($result['debug_info'])) {
                 $debugInfo = $result['debug_info'];
                 $serviceId = $result['service_id'];
@@ -730,69 +730,32 @@ class CDSHookService extends BaseService
 
     /**
      * 獲取服務的 prefetch 要求
-     * AI 生成修復：添加對每個服務不同 key 格式的支援
+     * 從數據庫中動態獲取，不再使用硬編碼
      */
     private function getServicePrefetchRequirements(string $serviceId): array
     {
-        // 從 Discovery 服務獲取的 prefetch 要求
-        $knownPrefetch = [
-            // Sandbox 服務使用小寫 key
-            'patient-greeting' => [
-                'patient' => 'Patient/{{context.patientId}}'
-            ],
-            '09139C' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '13026C' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '17022B' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Encounter' => 'Encounter?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '26074C' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '36014B' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '37048B' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Procedure' => 'Procedure?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            '80033B' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'Procedure' => 'Procedure?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ],
-            'USPSTFPrediabetesAndType2DiabetesPart1ScreeningFHIRv401' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'FamilyMemberHistory' => 'FamilyMemberHistory?patient={{context.patientId}}'
-            ],
-            'statin' => [
-                'Patient' => 'Patient/{{context.patientId}}',
-                'Condition' => 'Condition?patient={{context.patientId}}',
-                'FamilyMemberHistory' => 'FamilyMemberHistory?patient={{context.patientId}}',
-                'Observation' => 'Observation?patient={{context.patientId}}'
-            ]
-        ];
+        // 從數據庫獲取服務的 prefetch 要求
+        $prefetchJson = sqlQuery(
+            "SELECT prefetch FROM cds_hooks_services WHERE service_id = ?",
+            [$serviceId]
+        );
         
-        return $knownPrefetch[$serviceId] ?? [];
+        if (!empty($prefetchJson['prefetch'])) {
+            $prefetch = json_decode($prefetchJson['prefetch'], true);
+            if ($prefetch && is_array($prefetch)) {
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Using dynamic prefetch for service $serviceId: " . json_encode($prefetch));
+                }
+                return $prefetch;
+            }
+        }
+        
+        // 如果資料庫中沒有 prefetch 資料，返回空陣列（不再使用硬編碼）
+        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+            error_log("CDS Hook Debug: No prefetch data found for service $serviceId in database");
+        }
+        
+        return [];
     }
 
     /**
@@ -859,12 +822,37 @@ class CDSHookService extends BaseService
         try {
             $observations = [];
             
-            // 獲取生命徵象資料
-            $vitalQuery = "SELECT * FROM form_vitals WHERE pid = ? ORDER BY date DESC LIMIT 10";
+            // 獲取生命徵象資料 - 每種生命體徵只取最新的一條記錄
+            $vitalQuery = "SELECT * FROM form_vitals WHERE pid = ? AND activity = 1 ORDER BY date DESC";
             $vitalResult = sqlStatement($vitalQuery, [$patientId]);
             
+            // 調試：記錄查詢結果
+            if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                error_log("CDS Hook Debug: Querying vitals for patient $patientId");
+                $debugQuery = "SELECT COUNT(*) as count FROM form_vitals WHERE pid = ? AND activity = 1";
+                $debugResult = sqlQuery($debugQuery, [$patientId]);
+                error_log("CDS Hook Debug: Found " . $debugResult['count'] . " active vitals records for patient $patientId");
+            }
+            
+            // 用於追蹤已處理的生命體徵類型，避免重複
+            $processedVitals = [];
+            
             while ($row = sqlFetchArray($vitalResult)) {
-                if (!empty($row['bps'])) {
+                // 調試：記錄每一條記錄
+                if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                    error_log("CDS Hook Debug: Processing vitals record ID " . $row['id'] . " for patient $patientId: " . json_encode([
+                        'date' => $row['date'],
+                        'weight' => $row['weight'],
+                        'bps' => $row['bps'],
+                        'bpd' => $row['bpd'],
+                        'temperature' => $row['temperature'],
+                        'pulse' => $row['pulse']
+                    ]));
+                }
+                
+                // 處理血壓 - 只處理第一次遇到的有效記錄
+                if (!empty($row['bps']) && !isset($processedVitals['blood_pressure'])) {
+                    $processedVitals['blood_pressure'] = true;
                     $observation = [
                         'resourceType' => 'Observation',
                         'id' => 'vitals-bp-' . $row['id'],
@@ -940,6 +928,100 @@ class CDSHookService extends BaseService
                     }
                     
                     $observations[] = $observation;
+                }
+                
+                // 處理體重 - 使用 OpenEMR 的單位配置
+                if (!empty($row['weight']) && !isset($processedVitals['weight'])) {
+                    $weightValue = floatval($row['weight']);
+                    
+                    // 調試：記錄原始體重資料
+                    if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                        error_log("CDS Hook Debug: Found weight for patient $patientId: " . json_encode([
+                            'raw_weight' => $row['weight'],
+                            'weight_value' => $weightValue,
+                            'units_of_measurement' => $GLOBALS['units_of_measurement'] ?? 'not set',
+                            'form_id' => $row['id'],
+                            'date' => $row['date'] ?? 'no date'
+                        ]));
+                    }
+                    
+                    // 根據 OpenEMR 的單位配置決定單位
+                    $unitsOfMeasurement = $GLOBALS['units_of_measurement'] ?? 1;
+                    
+                    // CDS Hooks 始終返回公斤，不管 OpenEMR 配置如何
+                    if ($unitsOfMeasurement == 2 || $unitsOfMeasurement == 4) {
+                        // 公制單位：OpenEMR 儲存的是磅，需要轉換為公斤
+                        $weightValue = $weightValue * 0.45359237; // 磅轉公斤
+                        $weightUnit = 'kg';
+                        
+                        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                            error_log("CDS Hook Debug: Converted weight from lbs to kg: {$row['weight']} lbs -> {$weightValue} kg");
+                        }
+                    } else {
+                        // 美國單位：OpenEMR 儲存的是磅，轉換為公斤
+                        $weightValue = $weightValue * 0.45359237; // 磅轉公斤
+                        $weightUnit = 'kg';
+                        
+                        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                            error_log("CDS Hook Debug: Converted weight from lbs to kg: {$row['weight']} lbs -> {$weightValue} kg");
+                        }
+                    }
+                    
+                    // 只處理合理的體重值 (調整範圍以包含更多有效資料)
+                    if ($weightValue >= 5 && $weightValue <= 500) {
+                        $processedVitals['weight'] = true;
+                        
+                        $observation = [
+                            'resourceType' => 'Observation',
+                            'id' => 'vitals-weight-' . $row['id'],
+                            'meta' => [
+                                'profile' => ['http://hl7.org/fhir/StructureDefinition/Observation']
+                            ],
+                            'status' => 'final',
+                            'category' => [
+                                [
+                                    'coding' => [
+                                        [
+                                            'system' => 'http://terminology.hl7.org/CodeSystem/observation-category',
+                                            'code' => 'vital-signs',
+                                            'display' => 'Vital Signs'
+                                        ]
+                                    ]
+                                ]
+                            ],
+                            'subject' => ['reference' => 'Patient/' . $patientUuid],
+                            'code' => [
+                                'coding' => [
+                                    [
+                                        'system' => 'http://loinc.org',
+                                        'code' => '29463-7',
+                                        'display' => 'Body weight'
+                                    ]
+                                ],
+                                'text' => 'Body weight'
+                            ],
+                            'valueQuantity' => [
+                                'value' => $weightValue,
+                                'unit' => $weightUnit,
+                                'system' => 'http://unitsofmeasure.org',
+                                'code' => $weightUnit
+                            ]
+                        ];
+                        
+                        if (!empty($row['date'])) {
+                            $observation['effectiveDateTime'] = $this->convertToFHIRDateTime($row['date']);
+                        }
+                        
+                        $observations[] = $observation;
+                        
+                        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                            error_log("CDS Hook Debug: Added weight observation: {$weightValue} {$weightUnit}");
+                        }
+                    } else {
+                        if (($GLOBALS['cds_hooks_debug'] ?? false)) {
+                            error_log("CDS Hook Debug: Skipped invalid weight value: {$weightValue} {$weightUnit}");
+                        }
+                    }
                 }
             }
             

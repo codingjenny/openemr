@@ -97,7 +97,7 @@ function getServiceStates() {
         return [];
     }
     
-    $result = sqlStatement("SELECT service_id, enabled, service_title, service_description, hook_types FROM cds_hooks_services");
+    $result = sqlStatement("SELECT service_id, enabled, service_title, service_description, hook_types, prefetch FROM cds_hooks_services");
     $states = [];
     
     while ($row = sqlFetchArray($result)) {
@@ -105,7 +105,8 @@ function getServiceStates() {
             'enabled' => (bool)$row['enabled'],
             'title' => $row['service_title'],
             'description' => $row['service_description'],
-            'hook_types' => $row['hook_types']
+            'hook_types' => $row['hook_types'],
+            'prefetch' => $row['prefetch']
         ];
     }
     
@@ -124,6 +125,7 @@ function saveServiceInfo($service, $enabled = null) {
             `service_title` varchar(255) DEFAULT NULL,
             `service_description` text DEFAULT NULL,
             `hook_types` text DEFAULT NULL,
+            `prefetch` text DEFAULT NULL,
             `enabled` tinyint(1) DEFAULT 0,
             `discovery_url` varchar(500) DEFAULT NULL,
             `last_discovered` timestamp NULL DEFAULT NULL,
@@ -138,6 +140,12 @@ function saveServiceInfo($service, $enabled = null) {
     
     sqlStatement($createTableSql);
     
+    // Add prefetch column if it doesn't exist (for existing tables)
+    $prefetchColumnCheck = sqlQuery("SHOW COLUMNS FROM `cds_hooks_services` LIKE 'prefetch'");
+    if (empty($prefetchColumnCheck)) {
+        sqlStatement("ALTER TABLE `cds_hooks_services` ADD COLUMN `prefetch` text DEFAULT NULL AFTER `hook_types`");
+    }
+    
     $serviceId = $service['id'] ?? '';
     $title = $service['title'] ?? '';
     $description = $service['description'] ?? '';
@@ -147,6 +155,8 @@ function saveServiceInfo($service, $enabled = null) {
         $hookTypes = is_array($service['hook']) ? implode(', ', $service['hook']) : $service['hook'];
     }
     
+    $prefetch = isset($service['prefetch']) ? json_encode($service['prefetch']) : null;
+    
     $discoveryUrl = getDiscoveryUrl();
     
     // Only update enabled status if explicitly provided
@@ -154,21 +164,21 @@ function saveServiceInfo($service, $enabled = null) {
         $enabled = $enabled ? 1 : 0;
         sqlStatement(
             "INSERT INTO `cds_hooks_services` 
-             (`service_id`, `service_title`, `service_description`, `hook_types`, `enabled`, `discovery_url`, `last_discovered`) 
-             VALUES (?, ?, ?, ?, ?, ?, NOW()) 
+             (`service_id`, `service_title`, `service_description`, `hook_types`, `prefetch`, `enabled`, `discovery_url`, `last_discovered`) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, NOW()) 
              ON DUPLICATE KEY UPDATE 
-             `service_title` = ?, `service_description` = ?, `hook_types` = ?, `enabled` = ?, `discovery_url` = ?, `last_discovered` = NOW(), `updated_at` = CURRENT_TIMESTAMP",
-            [$serviceId, $title, $description, $hookTypes, $enabled, $discoveryUrl, $title, $description, $hookTypes, $enabled, $discoveryUrl]
+             `service_title` = ?, `service_description` = ?, `hook_types` = ?, `prefetch` = ?, `enabled` = ?, `discovery_url` = ?, `last_discovered` = NOW(), `updated_at` = CURRENT_TIMESTAMP",
+            [$serviceId, $title, $description, $hookTypes, $prefetch, $enabled, $discoveryUrl, $title, $description, $hookTypes, $prefetch, $enabled, $discoveryUrl]
         );
     } else {
         // Just update service info, keep existing enabled status
         sqlStatement(
             "INSERT INTO `cds_hooks_services` 
-             (`service_id`, `service_title`, `service_description`, `hook_types`, `discovery_url`, `last_discovered`) 
-             VALUES (?, ?, ?, ?, ?, NOW()) 
+             (`service_id`, `service_title`, `service_description`, `hook_types`, `prefetch`, `discovery_url`, `last_discovered`) 
+             VALUES (?, ?, ?, ?, ?, ?, NOW()) 
              ON DUPLICATE KEY UPDATE 
-             `service_title` = ?, `service_description` = ?, `hook_types` = ?, `discovery_url` = ?, `last_discovered` = NOW(), `updated_at` = CURRENT_TIMESTAMP",
-            [$serviceId, $title, $description, $hookTypes, $discoveryUrl, $title, $description, $hookTypes, $discoveryUrl]
+             `service_title` = ?, `service_description` = ?, `hook_types` = ?, `prefetch` = ?, `discovery_url` = ?, `last_discovered` = NOW(), `updated_at` = CURRENT_TIMESTAMP",
+            [$serviceId, $title, $description, $hookTypes, $prefetch, $discoveryUrl, $title, $description, $hookTypes, $prefetch, $discoveryUrl]
         );
     }
 }
@@ -246,12 +256,15 @@ switch ($action) {
             // Convert service states to array format expected by frontend
             $services = [];
             foreach ($serviceStates as $serviceId => $state) {
+                $prefetch = !empty($state['prefetch']) ? json_decode($state['prefetch'], true) : [];
+                
                 $services[] = [
                     'id' => $serviceId,
                     'title' => $state['title'],
                     'description' => $state['description'],
-                    'hook' => explode(', ', $state['hook_types']),
-                    'enabled' => $state['enabled']
+                    'hook' => !empty($state['hook_types']) ? explode(', ', $state['hook_types']) : [],
+                    'enabled' => $state['enabled'],
+                    'prefetch' => $prefetch
                 ];
             }
             
