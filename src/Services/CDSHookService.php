@@ -625,6 +625,7 @@ class CDSHookService extends BaseService
     /**
      * 根據服務要求構建 prefetch 資源
      * AI 生成方法（由 GitHub Copilot 生成）
+     * AI 修改：已移除所有資源查詢的 LIMIT 限制，現在 CDS Hooks prefetch 會獲取患者的所有相關資源
      */
     /* 開始：AI 生成的程式碼（GitHub Copilot） */
     private function buildPrefetchResources(array $service, int $patientId, string $patientUuid, array $basePrefetch, array $servicePrefetch): array
@@ -760,11 +761,12 @@ class CDSHookService extends BaseService
 
     /**
      * 獲取患者的 Condition 資源
+     * AI 修改：移除 LIMIT 限制以獲取所有條件（由 GitHub Copilot 協助修改）
      */
     private function getPatientConditions(int $patientId, string $patientUuid): array
     {
         try {
-            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'medical_problem' AND begdate IS NOT NULL ORDER BY begdate DESC LIMIT 10";
+            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'medical_problem' AND begdate IS NOT NULL ORDER BY begdate DESC";
             $result = sqlStatement($query, [$patientId]);
             
             $conditions = [];
@@ -1026,12 +1028,13 @@ class CDSHookService extends BaseService
             }
             
             // 獲取實驗室檢查結果
+            // AI 修改：移除 LIMIT 限制以獲取所有實驗室結果（由 GitHub Copilot 協助修改）
             $labQuery = "SELECT pr.*, rep.date_collected, rep.date_report, po.patient_id 
                         FROM procedure_result pr 
                         JOIN procedure_report rep ON pr.procedure_report_id = rep.procedure_report_id 
                         JOIN procedure_order po ON rep.procedure_order_id = po.procedure_order_id 
                         WHERE po.patient_id = ? AND pr.result != '' 
-                        ORDER BY rep.date_collected DESC LIMIT 20";
+                        ORDER BY rep.date_collected DESC";
             $labResult = sqlStatement($labQuery, [$patientId]);
             
             while ($row = sqlFetchArray($labResult)) {
@@ -1103,11 +1106,12 @@ class CDSHookService extends BaseService
 
     /**
      * 獲取患者的 Encounter 資源
+     * AI 修改：移除 LIMIT 限制以獲取所有就診記錄（由 GitHub Copilot 協助修改）
      */
     private function getPatientEncounters(int $patientId, string $patientUuid): array
     {
         try {
-            $query = "SELECT * FROM form_encounter WHERE pid = ? ORDER BY date DESC LIMIT 10";
+            $query = "SELECT * FROM form_encounter WHERE pid = ? ORDER BY date DESC";
             $result = sqlStatement($query, [$patientId]);
             
             $encounters = [];
@@ -1156,11 +1160,12 @@ class CDSHookService extends BaseService
 
     /**
      * 獲取患者的 Procedure 資源
+     * AI 修改：移除 LIMIT 限制以獲取所有手術記錄（由 GitHub Copilot 協助修改）
      */
     private function getPatientProcedures(int $patientId, string $patientUuid): array
     {
         try {
-            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'surgery' ORDER BY begdate DESC LIMIT 10";
+            $query = "SELECT * FROM lists WHERE pid = ? AND type = 'surgery' ORDER BY begdate DESC";
             $result = sqlStatement($query, [$patientId]);
             
             $procedures = [];
@@ -1186,11 +1191,12 @@ class CDSHookService extends BaseService
 
     /**
      * 獲取患者的家族病史資源
+     * AI 修改：移除 LIMIT 限制以獲取所有家族史（由 GitHub Copilot 協助修改）
      */
     private function getPatientFamilyHistory(int $patientId, string $patientUuid): array
     {
         try {
-            $query = "SELECT * FROM history_data WHERE pid = ? ORDER BY date DESC LIMIT 5";
+            $query = "SELECT * FROM history_data WHERE pid = ? ORDER BY date DESC";
             $result = sqlStatement($query, [$patientId]);
             
             $familyHistory = [];
