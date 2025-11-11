@@ -3,19 +3,25 @@
 namespace OpenEMR\Services\FHIR;
 
 use OpenEMR\Billing\BillingProcessor\LoggerInterface;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Common\Uuid\UuidMapping;
 use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\Services\BaseService;
+use OpenEMR\Services\EncounterService;
+use OpenEMR\Services\FormService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationLaboratoryService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationSocialHistoryService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationVitalsService;
 use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
 use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
-use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRObservation;
+use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
 use OpenEMR\Services\FHIR\Traits\MappedServiceCodeTrait;
 use OpenEMR\Services\FHIR\Traits\PatientSearchTrait;
+use OpenEMR\Services\FHIR\UtilsService;
 use OpenEMR\Services\ObservationLabService;
+use OpenEMR\Services\ObservationService;
 use OpenEMR\Services\Search\FhirSearchParameterDefinition;
 use OpenEMR\Services\Search\SearchFieldException;
 use OpenEMR\Services\Search\SearchFieldType;
@@ -33,7 +39,6 @@ use OpenEMR\Validators\ProcessingResult;
  */
 class FhirObservationService extends FhirServiceBase implements IResourceSearchableService, IResourceUSCIGProfileService, IPatientCompartmentResourceService, IFhirExportableResourceService
 {
-    use FhirServiceBaseEmptyTrait;
     use MappedServiceCodeTrait;
     use PatientSearchTrait;
     use BulkExportSupportAllOperationsTrait;
@@ -42,7 +47,17 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
     /**
      * @var ObservationLabService
      */
+    private $observationLabService;
+
+    /**
+     * @var ObservationService
+     */
     private $observationService;
+
+    /**
+     * @var EncounterService
+     */
+    private $encounterService;
 
     /**
      * @var BaseService[]
@@ -61,6 +76,8 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
         $this->addMappedService(new FhirObservationSocialHistoryService());
         $this->addMappedService(new FhirObservationVitalsService());
         $this->addMappedService(new FhirObservationLaboratoryService());
+        $this->observationService = new ObservationService();
+        $this->encounterService = new EncounterService();
         $this->logger = new SystemLogger();
     }
 
@@ -214,5 +231,821 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
             ,'http://hl7.org/fhir/StructureDefinition/bodytemp'
             ,'http://hl7.org/fhir/us/core/StructureDefinition/head-occipital-frontal-circumference-percentile'
         ];
+    }
+
+    /**
+     * Parses a FHIR Observation Resource, returning the equivalent OpenEMR observation record.
+     *
+     * @param FHIRDomainResource $fhirResource The source FHIR resource
+     * @return array a mapped OpenEMR data record (array)
+     */
+    public function parseFhirResource(FHIRDomainResource $fhirResource)
+    {
+        if (!$fhirResource instanceof FHIRObservation) {
+            throw new \BadMethodCallException("fhir resource must be of type " . FHIRObservation::class);
+        }
+
+        $data = array();
+
+        // Extract UUID
+        $data['uuid'] = (string)$fhirResource->getId() ?? null;
+
+        // Extract patient reference
+        $subject = $fhirResource->getSubject();
+        if (!empty($subject)) {
+            // Handle both object and array cases
+            if (is_object($subject) && method_exists($subject, 'getReference')) {
+                $subjectReference = UtilsService::parseReference($subject);
+                if (!empty($subjectReference) && $subjectReference['type'] === 'Patient' && $subjectReference['localResource']) {
+                    // Get patient ID from UUID
+                    $patientUuid = $subjectReference['uuid'];
+                    if (!empty($patientUuid)) {
+                        $patientData = QueryUtils::fetchRecords("SELECT pid FROM patient_data WHERE uuid = ?", [UuidRegistry::uuidToBytes($patientUuid)]);
+                        if (!empty($patientData) && !empty($patientData[0])) {
+                            $data['pid'] = $patientData[0]['pid'];
+                        }
+                    }
+                }
+            } elseif (is_array($subject)) {
+                // If subject is already an array (from JSON deserialization)
+                $referenceString = $subject['reference'] ?? null;
+                if (!empty($referenceString)) {
+                    // Parse reference string like "Patient/uuid"
+                    $parts = explode('/', $referenceString);
+                    if (count($parts) >= 2 && $parts[0] === 'Patient') {
+                        $patientUuid = $parts[1];
+                        if (!empty($patientUuid)) {
+                            $patientData = QueryUtils::fetchRecords("SELECT pid FROM patient_data WHERE uuid = ?", [UuidRegistry::uuidToBytes($patientUuid)]);
+                            if (!empty($patientData) && !empty($patientData[0])) {
+                                $data['pid'] = $patientData[0]['pid'];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract encounter from FHIR encounter field (FHIR R4 uses 'encounter' not 'context')
+        // Try getEncounter() method first (FHIR R4)
+        $encounterRef = null;
+        if (method_exists($fhirResource, 'getEncounter')) {
+            $encounterRef = $fhirResource->getEncounter();
+        } elseif (method_exists($fhirResource, 'getContext')) {
+            // Fallback for older FHIR versions
+            $encounterRef = $fhirResource->getContext();
+        }
+        
+        if (!empty($encounterRef)) {
+            // Handle both object and array cases
+            if (is_object($encounterRef) && method_exists($encounterRef, 'getReference')) {
+                $encounterReference = UtilsService::parseReference($encounterRef);
+                if (!empty($encounterReference) && $encounterReference['type'] === 'Encounter' && $encounterReference['localResource']) {
+                    // Get encounter ID from UUID
+                    $encounterUuid = $encounterReference['uuid'];
+                    if (!empty($encounterUuid)) {
+                        $encounterData = QueryUtils::fetchRecords(
+                            "SELECT encounter FROM form_encounter WHERE uuid = ?",
+                            [UuidRegistry::uuidToBytes($encounterUuid)]
+                        );
+                        if (!empty($encounterData) && !empty($encounterData[0])) {
+                            $data['encounter'] = $encounterData[0]['encounter'];
+                        }
+                    }
+                }
+            } elseif (is_array($encounterRef)) {
+                // If encounterRef is already an array (from JSON deserialization)
+                $referenceString = $encounterRef['reference'] ?? null;
+                if (!empty($referenceString)) {
+                    // Parse reference string like "Encounter/uuid"
+                    $parts = explode('/', $referenceString);
+                    if (count($parts) >= 2 && $parts[0] === 'Encounter') {
+                        $encounterUuid = $parts[1];
+                        if (!empty($encounterUuid)) {
+                            $encounterData = QueryUtils::fetchRecords(
+                                "SELECT encounter FROM form_encounter WHERE uuid = ?",
+                                [UuidRegistry::uuidToBytes($encounterUuid)]
+                            );
+                            if (!empty($encounterData) && !empty($encounterData[0])) {
+                                $data['encounter'] = $encounterData[0]['encounter'];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still no encounter, try to get from session (for web interface)
+        if (empty($data['encounter']) && isset($_SESSION) && isset($_SESSION['encounter'])) {
+            $data['encounter'] = $_SESSION['encounter'];
+        }
+
+        // Extract date/effectiveDateTime
+        $effectiveDateTime = $fhirResource->getEffectiveDateTime();
+        if (!empty($effectiveDateTime)) {
+            // Check if it's an object with getValue() method or already a string
+            if (is_object($effectiveDateTime) && method_exists($effectiveDateTime, 'getValue')) {
+                $dateValue = $effectiveDateTime->getValue();
+                if (!empty($dateValue)) {
+                    $data['date'] = UtilsService::getLocalDateAsUTC($dateValue);
+                } else {
+                    $data['date'] = date('Y-m-d H:i:s');
+                }
+            } elseif (is_string($effectiveDateTime)) {
+                // Already a string, use it directly
+                $data['date'] = UtilsService::getLocalDateAsUTC($effectiveDateTime);
+            } else {
+                $data['date'] = date('Y-m-d H:i:s');
+            }
+        } else {
+            $data['date'] = date('Y-m-d H:i:s');
+        }
+
+        // Extract status
+        $status = (string)$fhirResource->getStatus() ?? 'final';
+        $data['ob_status'] = $status;
+
+        // Extract code
+        $code = $fhirResource->getCode();
+        if (!empty($code)) {
+            // Check if code is an object or array
+            if (is_object($code) && method_exists($code, 'getCoding')) {
+                $codings = $code->getCoding();
+                if (!empty($codings) && is_array($codings)) {
+                    $primaryCoding = $codings[0];
+                    // Check if primaryCoding is an object with getCode() method
+                    if (is_object($primaryCoding) && method_exists($primaryCoding, 'getCode')) {
+                        $data['code'] = (string)$primaryCoding->getCode() ?? null;
+                        $data['code_type'] = 'LOINC'; // Default to LOINC
+                        if (method_exists($primaryCoding, 'getDisplay')) {
+                            $data['description'] = (string)$primaryCoding->getDisplay() ?? null;
+                        }
+                        if (empty($data['description']) && method_exists($code, 'getText')) {
+                            $data['description'] = (string)$code->getText() ?? null;
+                        }
+                    } elseif (is_array($primaryCoding)) {
+                        // If it's an array, extract code directly
+                        $data['code'] = (string)($primaryCoding['code'] ?? null);
+                        $data['code_type'] = 'LOINC';
+                        $data['description'] = (string)($primaryCoding['display'] ?? null);
+                    }
+                } elseif (is_array($codings)) {
+                    // If codings is already an array
+                    $primaryCoding = $codings[0] ?? null;
+                    if (is_array($primaryCoding)) {
+                        $data['code'] = (string)($primaryCoding['code'] ?? null);
+                        $data['code_type'] = 'LOINC';
+                        $data['description'] = (string)($primaryCoding['display'] ?? null);
+                    }
+                }
+            } elseif (is_array($code)) {
+                // If code is already an array (from JSON deserialization)
+                if (!empty($code['coding']) && is_array($code['coding'])) {
+                    $primaryCoding = $code['coding'][0] ?? null;
+                    if (is_array($primaryCoding)) {
+                        $data['code'] = (string)($primaryCoding['code'] ?? null);
+                        $data['code_type'] = 'LOINC';
+                        $data['description'] = (string)($primaryCoding['display'] ?? $code['text'] ?? null);
+                    }
+                }
+            }
+        }
+
+        // Extract category
+        $categories = $fhirResource->getCategory();
+        if (!empty($categories)) {
+            $primaryCategory = is_array($categories) ? $categories[0] : $categories;
+            if (is_object($primaryCategory) && method_exists($primaryCategory, 'getCoding')) {
+                $categoryCodings = $primaryCategory->getCoding();
+                if (!empty($categoryCodings) && is_array($categoryCodings)) {
+                    $firstCoding = $categoryCodings[0];
+                    if (is_object($firstCoding) && method_exists($firstCoding, 'getCode')) {
+                        $data['category'] = (string)$firstCoding->getCode() ?? null;
+                    } elseif (is_array($firstCoding)) {
+                        $data['category'] = (string)($firstCoding['code'] ?? null);
+                    }
+                }
+            } elseif (is_array($primaryCategory)) {
+                // If category is already an array
+                if (!empty($primaryCategory['coding']) && is_array($primaryCategory['coding'])) {
+                    $firstCoding = $primaryCategory['coding'][0] ?? null;
+                    if (is_array($firstCoding)) {
+                        $data['category'] = (string)($firstCoding['code'] ?? null);
+                    }
+                }
+            }
+        }
+
+        // Extract value
+        $valueQuantity = $fhirResource->getValueQuantity();
+        if (!empty($valueQuantity)) {
+            // Check if it's an object with getValue() method
+            if (is_object($valueQuantity) && method_exists($valueQuantity, 'getValue')) {
+                $value = $valueQuantity->getValue();
+                $data['ob_value'] = $value !== null ? (string)$value : null;
+                if (method_exists($valueQuantity, 'getUnit')) {
+                    $unit = $valueQuantity->getUnit();
+                    $data['ob_unit'] = $unit !== null ? (string)$unit : null;
+                }
+                $data['ob_type'] = 'numeric';
+            } elseif (is_array($valueQuantity)) {
+                // If it's already an array (from JSON deserialization)
+                $data['ob_value'] = (string)($valueQuantity['value'] ?? null);
+                $data['ob_unit'] = (string)($valueQuantity['unit'] ?? null);
+                $data['ob_type'] = 'numeric';
+            } else {
+                // If it's already a value, use it directly
+                $data['ob_value'] = (string)$valueQuantity;
+                $data['ob_type'] = 'numeric';
+            }
+            
+            $this->logger->debug("FhirObservationService::parseFhirResource() extracted valueQuantity", [
+                'ob_value' => $data['ob_value'] ?? null,
+                'ob_unit' => $data['ob_unit'] ?? null,
+                'ob_type' => $data['ob_type'] ?? null
+            ]);
+        } else {
+            $valueString = $fhirResource->getValueString();
+            if (!empty($valueString)) {
+                // Check if it's an object with getValue() method
+                if (is_object($valueString) && method_exists($valueString, 'getValue')) {
+                    $data['ob_value'] = (string)$valueString->getValue();
+                } else {
+                    $data['ob_value'] = (string)$valueString;
+                }
+                $data['ob_type'] = 'text';
+            } else {
+                $valueCodeableConcept = $fhirResource->getValueCodeableConcept();
+                if (!empty($valueCodeableConcept)) {
+                    if (is_object($valueCodeableConcept) && method_exists($valueCodeableConcept, 'getCoding')) {
+                        $valueCodings = $valueCodeableConcept->getCoding();
+                        if (!empty($valueCodings) && is_array($valueCodings)) {
+                            $firstCoding = $valueCodings[0];
+                            if (is_object($firstCoding) && method_exists($firstCoding, 'getCode')) {
+                                $data['ob_value'] = (string)$firstCoding->getCode();
+                                $data['ob_type'] = 'code';
+                            } elseif (is_array($firstCoding)) {
+                                $data['ob_value'] = (string)($firstCoding['code'] ?? null);
+                                $data['ob_type'] = 'code';
+                            }
+                        }
+                    } elseif (is_array($valueCodeableConcept)) {
+                        // If valueCodeableConcept is already an array
+                        if (!empty($valueCodeableConcept['coding']) && is_array($valueCodeableConcept['coding'])) {
+                            $firstCoding = $valueCodeableConcept['coding'][0] ?? null;
+                            if (is_array($firstCoding)) {
+                                $data['ob_value'] = (string)($firstCoding['code'] ?? null);
+                                $data['ob_type'] = 'code';
+                            }
+                        }
+                    }
+                    
+                    // If we still don't have a value, try to get text
+                    if (empty($data['ob_value'])) {
+                        if (is_object($valueCodeableConcept) && method_exists($valueCodeableConcept, 'getText')) {
+                            $data['ob_value'] = (string)$valueCodeableConcept->getText();
+                            $data['ob_type'] = 'text';
+                        } elseif (is_array($valueCodeableConcept)) {
+                            $data['ob_value'] = (string)($valueCodeableConcept['text'] ?? null);
+                            $data['ob_type'] = 'text';
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract observation name/description
+        if (empty($data['observation'])) {
+            $data['observation'] = $data['description'] ?? $data['code'] ?? 'Observation';
+        }
+
+        // Extract performer (practitioner)
+        $performers = $fhirResource->getPerformer();
+        if (!empty($performers)) {
+            $performerReference = UtilsService::parseReference($performers[0]);
+            if (!empty($performerReference) && $performerReference['resourceType'] === 'Practitioner' && $performerReference['localResource']) {
+                // Get user from practitioner UUID
+                $practitionerUuid = $performerReference['uuid'];
+                $practitionerData = QueryUtils::fetchRecords("SELECT id, username FROM users WHERE uuid = ?", [UuidRegistry::uuidToBytes($practitionerUuid)]);
+                if (!empty($practitionerData) && !empty($practitionerData[0])) {
+                    $data['user'] = $practitionerData[0]['username'];
+                }
+            }
+        }
+
+        // Set default values (safely check for session)
+        if (empty($data['user'])) {
+            $data['user'] = (isset($_SESSION) && isset($_SESSION['authUser'])) ? $_SESSION['authUser'] : null;
+        }
+        if (empty($data['groupname'])) {
+            $data['groupname'] = (isset($_SESSION) && isset($_SESSION['authProvider'])) ? $_SESSION['authProvider'] : null;
+        }
+        if (empty($data['authorized'])) {
+            $data['authorized'] = (isset($_SESSION) && isset($_SESSION['userauthorized'])) ? $_SESSION['userauthorized'] : 0;
+        }
+        
+        // Ensure required fields have defaults
+        if (empty($data['observation'])) {
+            $data['observation'] = $data['description'] ?? $data['code'] ?? 'Observation';
+        }
+        if (empty($data['ob_status'])) {
+            $data['ob_status'] = 'final';
+        }
+
+        return $data;
+    }
+
+    /**
+     * Inserts an OpenEMR observation record into the system.
+     *
+     * @param array $openEmrRecord OpenEMR observation record
+     * @return ProcessingResult
+     */
+    public function insertOpenEMRRecord($openEmrRecord)
+    {
+        $processingResult = new ProcessingResult();
+
+        try {
+            // Validate required fields
+            if (empty($openEmrRecord['pid'])) {
+                $processingResult->setValidationMessages(['pid' => 'Patient ID is required']);
+                return $processingResult;
+            }
+
+            if (empty($openEmrRecord['encounter'])) {
+                // Try to get from session (for web interface)
+                $openEmrRecord['encounter'] = (isset($_SESSION) && isset($_SESSION['encounter'])) ? $_SESSION['encounter'] : null;
+                
+                // If still no encounter, try to get an existing encounter for today
+                if (empty($openEmrRecord['encounter']) && !empty($openEmrRecord['pid'])) {
+                    try {
+                        $today = date('Y-m-d');
+                        $existingEncounter = QueryUtils::fetchRecords(
+                            "SELECT encounter FROM form_encounter WHERE pid = ? AND date = ? ORDER BY id DESC LIMIT 1",
+                            [$openEmrRecord['pid'], $today]
+                        );
+                        
+                        if (!empty($existingEncounter) && !empty($existingEncounter[0])) {
+                            $openEmrRecord['encounter'] = $existingEncounter[0]['encounter'];
+                        }
+                    } catch (\Throwable $e) {
+                        $this->logger->error("Failed to get existing encounter for observation", [
+                            'error' => $e->getMessage(),
+                            'trace' => $e->getTraceAsString(),
+                            'pid' => $openEmrRecord['pid']
+                        ]);
+                    }
+                }
+                
+                // If still no encounter, we need to create one or use a default
+                // Note: saveObservationRecord requires encounter for addForm() call
+                if (empty($openEmrRecord['encounter'])) {
+                    // Try to create a minimal encounter using direct SQL to avoid API issues
+                    try {
+                        $today = date('Y-m-d');
+                        $userId = (isset($_SESSION) && isset($_SESSION['authUserID'])) ? $_SESSION['authUserID'] : 1; // Default to user ID 1 if not set
+                        $userName = (isset($_SESSION) && isset($_SESSION['authUser'])) ? $_SESSION['authUser'] : 'admin';
+                        $userGroup = (isset($_SESSION) && isset($_SESSION['authProvider'])) ? $_SESSION['authProvider'] : 'Default';
+                        
+                        // Generate encounter ID safely using database sequence (same as EncounterService)
+                        // Use the same method as EncounterService::insertEncounter() which uses generate_id()
+                        // Since generate_id() may not be available in API context, use database GenID directly
+                        try {
+                            $db = $GLOBALS['adodb']['db'] ?? null;
+                            if ($db && method_exists($db, 'GenID')) {
+                                $newEncounter = $db->GenID("sequences");
+                            } else {
+                                // Fallback: use max + 1 (with potential race condition, but acceptable for API use)
+                                $maxEncounter = QueryUtils::fetchRecords(
+                                    "SELECT MAX(CAST(encounter AS UNSIGNED)) as max_enc FROM form_encounter",
+                                    []
+                                );
+                                $newEncounter = 1;
+                                if (!empty($maxEncounter) && !empty($maxEncounter[0]['max_enc'])) {
+                                    $newEncounter = intval($maxEncounter[0]['max_enc']) + 1;
+                                }
+                            }
+                        } catch (\Exception $e) {
+                            // Fallback to max + 1 if GenID fails
+                            $maxEncounter = QueryUtils::fetchRecords(
+                                "SELECT MAX(CAST(encounter AS UNSIGNED)) as max_enc FROM form_encounter",
+                                []
+                            );
+                            $newEncounter = 1;
+                            if (!empty($maxEncounter) && !empty($maxEncounter[0]['max_enc'])) {
+                                $newEncounter = intval($maxEncounter[0]['max_enc']) + 1;
+                            }
+                        }
+                        
+                        // Insert minimal encounter record
+                        $encounterUuid = (new UuidRegistry(['table_name' => 'form_encounter']))->createUuid();
+                        $encounterUuidBytes = UuidRegistry::uuidToBytes($encounterUuid);
+                        $encounterInsert = QueryUtils::sqlInsert(
+                            "INSERT INTO form_encounter SET 
+                                encounter = ?,
+                                uuid = ?,
+                                date = ?,
+                                pid = ?,
+                                reason = ?,
+                                provider_id = ?,
+                                user = ?,
+                                `group` = ?",
+                            [
+                                $newEncounter,
+                                $encounterUuidBytes,
+                                $today,
+                                $openEmrRecord['pid'],
+                                'FHIR Observation Entry',
+                                $userId,
+                                $userName,
+                                $userGroup
+                            ]
+                        );
+                        
+                        if ($encounterInsert) {
+                            // Also add form entry (same as EncounterService does)
+                            // Use FormService to ensure consistency with existing code
+                            try {
+                                $formService = new FormService();
+                                // Note: addForm expects form_id (which is form_encounter.id from the insert)
+                                // This matches EncounterService::insertEncounter() behavior
+                                $formService->addForm(
+                                    $newEncounter,        // encounter number
+                                    "New Patient Encounter", // form_name
+                                    $encounterInsert,     // form_id (form_encounter.id returned from INSERT)
+                                    "newpatient",         // formdir
+                                    $openEmrRecord['pid'], // pid
+                                    1,                   // authorized
+                                    $today,              // date
+                                    $userName,           // user
+                                    $userGroup           // group
+                                );
+                            } catch (\Exception $formException) {
+                                // If FormService fails, log but don't fail the observation
+                                // The encounter is already created, so observation can still be saved
+                                $this->logger->warning("Failed to add form entry for encounter (non-critical)", [
+                                    'error' => $formException->getMessage(),
+                                    'encounter' => $newEncounter,
+                                    'pid' => $openEmrRecord['pid']
+                                ]);
+                            }
+                            
+                            $openEmrRecord['encounter'] = $newEncounter;
+                            $this->logger->info("Created minimal encounter for observation", [
+                                'pid' => $openEmrRecord['pid'],
+                                'encounter' => $newEncounter
+                            ]);
+                        }
+                    } catch (\Throwable $e) {
+                        $this->logger->error("Failed to create minimal encounter", [
+                            'error' => $e->getMessage(),
+                            'trace' => $e->getTraceAsString(),
+                            'pid' => $openEmrRecord['pid']
+                        ]);
+                    }
+                }
+                
+                // Final fallback: if still no encounter, use 0 (may cause issues but better than NULL)
+                if (empty($openEmrRecord['encounter'])) {
+                    $this->logger->warning("No encounter available, using 0 as fallback", [
+                        'pid' => $openEmrRecord['pid']
+                    ]);
+                    $openEmrRecord['encounter'] = 0;
+                }
+            }
+
+            // Ensure we have minimum required fields for saveObservation
+            if (empty($openEmrRecord['groupname'])) {
+                // Try to get from user if available
+                if (!empty($openEmrRecord['user'])) {
+                    $userFacility = QueryUtils::fetchRecords(
+                        "SELECT facility FROM users WHERE username = ?",
+                        [$openEmrRecord['user']]
+                    );
+                    if (!empty($userFacility) && !empty($userFacility[0])) {
+                        $openEmrRecord['groupname'] = $userFacility[0]['facility'];
+                    }
+                }
+                // If still empty, use a default
+                if (empty($openEmrRecord['groupname'])) {
+                    $openEmrRecord['groupname'] = 'Default';
+                }
+            }
+            
+            // Save the observation using ObservationService
+            try {
+                $savedObservation = $this->observationService->saveObservation($openEmrRecord);
+
+                if (!empty($savedObservation) && !empty($savedObservation['id']) && !empty($savedObservation['uuid'])) {
+                    // Log the savedObservation structure for debugging
+                    $this->logger->debug("FhirObservationService::insertOpenEMRRecord() savedObservation", [
+                        'id' => $savedObservation['id'] ?? null,
+                        'uuid' => $savedObservation['uuid'] ?? null,
+                        'ob_value' => $savedObservation['ob_value'] ?? null,
+                        'ob_value_type' => gettype($savedObservation['ob_value'] ?? null),
+                        'ob_type' => $savedObservation['ob_type'] ?? null,
+                        'ob_unit' => $savedObservation['ob_unit'] ?? null
+                    ]);
+                    
+                    // Convert saved observation to FHIR resource directly
+                    // savedObservation already contains all the data we need from ObservationService::saveObservation()
+                    $fhirResource = $this->parseOpenEMRRecord($savedObservation, false);
+                    $processingResult->addData($fhirResource);
+                } else {
+                    $processingResult->addInternalError("Failed to save observation record - no ID or UUID returned");
+                }
+            } catch (\Exception $saveException) {
+                $this->logger->error("FhirObservationService::insertOpenEMRRecord() saveObservation exception", [
+                    'error' => $saveException->getMessage(),
+                    'trace' => $saveException->getTraceAsString(),
+                    'observationData' => $openEmrRecord
+                ]);
+                $processingResult->addInternalError("Error saving observation: " . $saveException->getMessage());
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("FhirObservationService::insertOpenEMRRecord() exception", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            $processingResult->addInternalError("Error inserting observation: " . $e->getMessage());
+        }
+
+        return $processingResult;
+    }
+
+    /**
+     * Updates an existing OpenEMR observation record.
+     *
+     * @param string $fhirResourceId The OpenEMR record's FHIR Resource ID (UUID).
+     * @param array $updatedOpenEMRRecord The "updated" OpenEMR record.
+     * @return ProcessingResult
+     */
+    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord)
+    {
+        $processingResult = new ProcessingResult();
+
+        try {
+            // Get the existing observation by UUID
+            $uuidBytes = UuidRegistry::uuidToBytes($fhirResourceId);
+            $existingObservations = QueryUtils::fetchRecords(
+                "SELECT id, pid, encounter FROM form_observation WHERE uuid = ?",
+                [$uuidBytes]
+            );
+            $existingObservation = !empty($existingObservations) ? $existingObservations[0] : null;
+
+            if (empty($existingObservation)) {
+                $processingResult->setValidationMessages(['_id' => 'Observation not found']);
+                return $processingResult;
+            }
+
+            // Merge with existing data
+            $updatedOpenEMRRecord['id'] = $existingObservation['id'];
+            $updatedOpenEMRRecord['pid'] = $existingObservation['pid'];
+            $updatedOpenEMRRecord['encounter'] = $existingObservation['encounter'];
+
+            // Save the updated observation
+            $savedObservation = $this->observationService->saveObservation($updatedOpenEMRRecord);
+
+            if (!empty($savedObservation) && !empty($savedObservation['id']) && !empty($savedObservation['uuid'])) {
+                // Convert saved observation to FHIR resource directly
+                // savedObservation already contains all the data we need from ObservationService::saveObservation()
+                $fhirResource = $this->parseOpenEMRRecord($savedObservation, false);
+                $processingResult->addData($fhirResource);
+            } else {
+                $processingResult->addInternalError("Failed to update observation record - no ID or UUID returned");
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("FhirObservationService::updateOpenEMRRecord() exception", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $processingResult->addInternalError("Error updating observation: " . $e->getMessage());
+        }
+
+        return $processingResult;
+    }
+
+    /**
+     * Parses an OpenEMR data record, returning the equivalent FHIR Resource
+     *
+     * @param array $dataRecord The source OpenEMR data record
+     * @param bool $encode Indicates if the returned resource is encoded into a string. Defaults to False.
+     * @return FHIRObservation|string the FHIR Resource. Returned format is defined using $encode parameter.
+     */
+    public function parseOpenEMRRecord($dataRecord = array(), $encode = false)
+    {
+        // For generic observations, we'll use the ObservationService to get the data
+        // and convert it to FHIR format
+        // This is a simplified implementation - in practice, you might want to delegate
+        // to a specific service based on category/code
+        
+        $observation = new FHIRObservation();
+        $meta = new \OpenEMR\FHIR\R4\FHIRElement\FHIRMeta();
+        $meta->setVersionId('1');
+        if (!empty($dataRecord['date'])) {
+            $meta->setLastUpdated(UtilsService::getLocalDateAsUTC($dataRecord['date']));
+        } else {
+            $meta->setLastUpdated(UtilsService::getDateFormattedAsUTC());
+        }
+        $observation->setMeta($meta);
+
+        $id = new \OpenEMR\FHIR\R4\FHIRElement\FHIRId();
+        // Ensure uuid is a string (it should already be converted by createResultRecordFromDatabaseResult)
+        $uuidValue = $dataRecord['uuid'] ?? null;
+        if (!empty($uuidValue) && !is_string($uuidValue)) {
+            $uuidValue = UuidRegistry::uuidToString($uuidValue);
+        }
+        $id->setValue($uuidValue);
+        $observation->setId($id);
+
+        // Set status
+        $status = $dataRecord['ob_status'] ?? 'final';
+        $observation->setStatus($status);
+
+        // Set code
+        if (!empty($dataRecord['code'])) {
+            $codeConcept = new \OpenEMR\FHIR\R4\FHIRElement\FHIRCodeableConcept();
+            $coding = new \OpenEMR\FHIR\R4\FHIRElement\FHIRCoding();
+            $coding->setSystem('http://loinc.org');
+            $coding->setCode($dataRecord['code']);
+            $coding->setDisplay($dataRecord['description'] ?? $dataRecord['observation'] ?? null);
+            $codeConcept->addCoding($coding);
+            $observation->setCode($codeConcept);
+        }
+
+        // Set subject (patient)
+        if (!empty($dataRecord['pid'])) {
+            $patientUuidBytes = QueryUtils::fetchRecords(
+                "SELECT uuid FROM patient_data WHERE pid = ?",
+                [$dataRecord['pid']]
+            );
+            if (!empty($patientUuidBytes) && !empty($patientUuidBytes[0])) {
+                $patientUuid = UuidRegistry::uuidToString($patientUuidBytes[0]['uuid']);
+                $subject = new \OpenEMR\FHIR\R4\FHIRElement\FHIRReference();
+                $subject->setReference('Patient/' . $patientUuid);
+                $observation->setSubject($subject);
+            }
+        }
+
+        // Set effective date
+        if (!empty($dataRecord['date'])) {
+            $effectiveDateTime = new \OpenEMR\FHIR\R4\FHIRElement\FHIRDateTime();
+            $effectiveDateTime->setValue(UtilsService::getLocalDateAsUTC($dataRecord['date']));
+            $observation->setEffectiveDateTime($effectiveDateTime);
+        }
+
+        // Set value
+        $this->logger->debug("FhirObservationService::parseOpenEMRRecord() processing value", [
+            'ob_value' => $dataRecord['ob_value'] ?? null,
+            'ob_value_type' => gettype($dataRecord['ob_value'] ?? null),
+            'ob_type' => $dataRecord['ob_type'] ?? null,
+            'ob_unit' => $dataRecord['ob_unit'] ?? null,
+            'has_ob_value' => !empty($dataRecord['ob_value'])
+        ]);
+        
+        if (!empty($dataRecord['ob_value'])) {
+            // Ensure ob_value is a scalar value, not an array
+            $obValue = $dataRecord['ob_value'];
+            if (is_array($obValue)) {
+                // If it's an array, try to get the first element or convert to string
+                $obValue = !empty($obValue) ? (is_array($obValue[0] ?? null) ? json_encode($obValue) : ($obValue[0] ?? (string)$obValue)) : null;
+            }
+            
+            if ($dataRecord['ob_type'] === 'numeric' || is_numeric($obValue)) {
+                $valueQuantity = new \OpenEMR\FHIR\R4\FHIRElement\FHIRQuantity();
+                // Convert to float/int for numeric values
+                $numericValue = is_numeric($obValue) ? (float)$obValue : null;
+                if ($numericValue !== null) {
+                    $valueQuantity->setValue($numericValue);
+                    if (!empty($dataRecord['ob_unit'])) {
+                        $valueQuantity->setUnit((string)$dataRecord['ob_unit']);
+                    }
+                    $observation->setValueQuantity($valueQuantity);
+                    $this->logger->debug("FhirObservationService::parseOpenEMRRecord() set valueQuantity", [
+                        'value' => $numericValue,
+                        'unit' => $dataRecord['ob_unit'] ?? null
+                    ]);
+                } else {
+                    $this->logger->warning("FhirObservationService::parseOpenEMRRecord() numericValue is null", [
+                        'obValue' => $obValue,
+                        'ob_type' => $dataRecord['ob_type'] ?? null
+                    ]);
+                }
+            } else {
+                $valueString = new \OpenEMR\FHIR\R4\FHIRElement\FHIRString();
+                $valueString->setValue((string)$obValue);
+                $observation->setValueString($valueString);
+                $this->logger->debug("FhirObservationService::parseOpenEMRRecord() set valueString", [
+                    'value' => (string)$obValue
+                ]);
+            }
+        } else {
+            $this->logger->warning("FhirObservationService::parseOpenEMRRecord() ob_value is empty", [
+                'dataRecord_keys' => array_keys($dataRecord)
+            ]);
+        }
+
+        // Set category
+        if (!empty($dataRecord['category'])) {
+            $categoryConcept = new \OpenEMR\FHIR\R4\FHIRElement\FHIRCodeableConcept();
+            $categoryCoding = new \OpenEMR\FHIR\R4\FHIRElement\FHIRCoding();
+            $categoryCoding->setSystem('http://terminology.hl7.org/CodeSystem/observation-category');
+            $categoryCoding->setCode($dataRecord['category']);
+            $categoryConcept->addCoding($categoryCoding);
+            $observation->addCategory($categoryConcept);
+        }
+
+        if ($encode) {
+            return json_encode($observation);
+        } else {
+            return $observation;
+        }
+    }
+
+    /**
+     * Searches for OpenEMR records using OpenEMR search parameters
+     *
+     * @param array $openEMRSearchParameters OpenEMR search fields
+     * @param string|null $puuidBind Optional variable to only allow visibility of the patient with this puuid.
+     * @return ProcessingResult
+     */
+    protected function searchForOpenEMRRecords($openEMRSearchParameters, $puuidBind = null): ProcessingResult
+    {
+        $processingResult = new ProcessingResult();
+        
+        try {
+            // Build search query
+            $where = [];
+            $bind = [];
+            
+            if (!empty($openEMRSearchParameters['pid'])) {
+                $where[] = "pid = ?";
+                $bind[] = $openEMRSearchParameters['pid'];
+            }
+            
+            if (!empty($openEMRSearchParameters['code'])) {
+                $where[] = "code = ?";
+                $bind[] = $openEMRSearchParameters['code'];
+            }
+            
+            if (!empty($openEMRSearchParameters['category'])) {
+                $where[] = "category = ?";
+                $bind[] = $openEMRSearchParameters['category'];
+            }
+            
+            if (!empty($openEMRSearchParameters['date'])) {
+                $where[] = "date >= ?";
+                $bind[] = $openEMRSearchParameters['date'];
+            }
+            
+            $sql = "SELECT * FROM form_observation";
+            if (!empty($where)) {
+                $sql .= " WHERE " . implode(" AND ", $where);
+            }
+            $sql .= " ORDER BY date DESC";
+            
+            $records = QueryUtils::fetchRecords($sql, $bind);
+            
+            foreach ($records as $record) {
+                $processingResult->addData($record);
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("FhirObservationService::searchForOpenEMRRecords() exception", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $processingResult->addInternalError("Error searching observations: " . $e->getMessage());
+        }
+        
+        return $processingResult;
+    }
+
+    /**
+     * Creates the Provenance resource for the equivalent FHIR Resource
+     *
+     * @param mixed $dataRecord The source OpenEMR data record or FHIR resource
+     * @param bool $encode Indicates if the returned resource is encoded into a string. Defaults to False.
+     * @return \OpenEMR\FHIR\R4\FHIRResource\FhirProvenance|string the FHIR Resource. Returned format is defined using $encode parameter.
+     */
+    public function createProvenanceResource($dataRecord, $encode = false)
+    {
+        if (!($dataRecord instanceof FHIRObservation)) {
+            throw new \BadMethodCallException("Data record should be correct instance class");
+        }
+        
+        $fhirProvenanceService = new \OpenEMR\Services\FHIR\FhirProvenanceService();
+        $performer = null;
+        if (!empty($dataRecord->getPerformer())) {
+            // grab the first one
+            $performer = current($dataRecord->getPerformer());
+        }
+        $fhirProvenance = $fhirProvenanceService->createProvenanceForDomainResource($dataRecord, $performer);
+        
+        if ($encode) {
+            return json_encode($fhirProvenance);
+        } else {
+            return $fhirProvenance;
+        }
     }
 }

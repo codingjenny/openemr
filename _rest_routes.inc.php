@@ -7618,6 +7618,7 @@ use OpenEMR\RestControllers\FHIR\FhirProcedureRestController;
 use OpenEMR\RestControllers\FHIR\FhirProvenanceRestController;
 use OpenEMR\RestControllers\FHIR\FhirValueSetRestController;
 use OpenEMR\RestControllers\FHIR\FhirMetaDataRestController;
+use OpenEMR\RestControllers\FHIR\FhirBundleRestController;
 use OpenEMR\RestControllers\FHIR\Operations\FhirOperationExportRestController;
 use OpenEMR\RestControllers\FHIR\Operations\FhirOperationDocRefRestController;
 use OpenEMR\RestControllers\FHIR\Operations\FhirOperationDefinitionRestController;
@@ -13613,6 +13614,60 @@ RestConfig::$FHIR_ROUTE_MAP = array(
     "GET /fhir/metadata" => function () {
         $return = (new FhirMetaDataRestController())->getMetaData();
         RestConfig::apiLog($return);
+        return $return;
+    },
+
+    /**
+     *  @OA\Post(
+     *      path="/fhir/Bundle",
+     *      description="Processes a FHIR Bundle resource. Supports transaction and batch bundle types.",
+     *      tags={"fhir"},
+     *      @OA\RequestBody(
+     *          required=true,
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  @OA\Property(
+     *                      property="resourceType",
+     *                      type="string",
+     *                      example="Bundle"
+     *                  ),
+     *                  @OA\Property(
+     *                      property="type",
+     *                      type="string",
+     *                      example="transaction"
+     *                  ),
+     *                  @OA\Property(
+     *                      property="entry",
+     *                      type="array",
+     *                      description="Array of bundle entries"
+     *                  )
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="200",
+     *          description="Bundle processed successfully",
+     *          @OA\MediaType(
+     *              mediaType="application/json"
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="400",
+     *          ref="#/components/responses/badrequest"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "POST /fhir/Bundle" => function (HttpRestRequest $request) {
+        RestConfig::authorization_check("patients", "demo");
+        $data = (array) (json_decode(file_get_contents("php://input"), true));
+        $return = (new FhirBundleRestController())->post($data);
+        RestConfig::apiLog($return, $data);
         return $return;
     },
 

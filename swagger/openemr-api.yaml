@@ -3170,7 +3170,9 @@ paths:
           $ref: '#/components/responses/unauthorized'
       security:
         -
-          openemr_auth: []
+          openemr_auth:
+            - user/employer.read
+            - patient/employer.read
   '/api/patient/{puuid}/insurance':
     get:
       tags:
@@ -6830,6 +6832,41 @@ paths:
       security:
         -
           openemr_auth: []
+  /fhir/Questionnaire:
+    get:
+      tags:
+        - fhir
+      description: 'Returns a list of Questionnaire resources.'
+      parameters:
+        -
+          name: _id
+          in: query
+          description: 'The id for the Questionnaire resource. '
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Standard Response'
+          content:
+            application/json:
+              schema:
+                properties:
+                  'json object': { description: 'FHIR Json object.', type: object }
+                type: object
+                example:
+                  meta: { lastUpdated: '2021-09-14T09:13:51' }
+                  resourceType: Bundle
+                  type: collection
+                  total: 0
+                  link: [{ relation: self, url: 'https://localhost:9300/apis/default/fhir/Questionnaire' }]
+        '400':
+          $ref: '#/components/responses/badrequest'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+      security:
+        -
+          openemr_auth: []
   /fhir/ValueSet:
     get:
       tags:
@@ -6915,6 +6952,39 @@ paths:
       responses:
         '200':
           description: 'Return CapabilityStatement resource of the fhir server'
+  /fhir/Bundle:
+    post:
+      tags:
+        - fhir
+      description: 'Processes a FHIR Bundle resource. Supports transaction and batch bundle types.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              properties:
+                resourceType:
+                  type: string
+                  example: Bundle
+                type:
+                  type: string
+                  example: transaction
+                entry:
+                  description: 'Array of bundle entries'
+                  type: array
+              type: object
+      responses:
+        '200':
+          description: 'Bundle processed successfully'
+          content:
+            application/json: {  }
+        '400':
+          $ref: '#/components/responses/badrequest'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+      security:
+        -
+          openemr_auth: []
   /fhir/.well-known/smart-configuration:
     get:
       tags:
@@ -8153,6 +8223,7 @@ components:
             user/document.read: 'Read documents the user has access to (api:oemr)'
             user/document.write: 'Write documents the user has access to (api:oemr)'
             user/drug.read: 'Read drugs the user has access to (api:oemr)'
+            user/employer.read: 'Read patient employer demographics the user has access to (api:oemr)'
             user/encounter.read: 'Read encounters the user has access to (api:oemr)'
             user/encounter.write: 'Write encounters the user has access to (api:oemr)'
             user/facility.read: 'Read facilities the user has access to (api:oemr)'

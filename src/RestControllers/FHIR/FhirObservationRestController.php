@@ -14,18 +14,79 @@ namespace OpenEMR\RestControllers\FHIR;
 
 use OpenEMR\Services\FHIR\FhirObservationService;
 use OpenEMR\Services\FHIR\FhirResourcesService;
+use OpenEMR\Services\FHIR\FhirValidationService;
+use OpenEMR\Services\FHIR\Serialization\FhirObservationSerializer;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\Common\Logging\SystemLogger;
 
 class FhirObservationRestController
 {
     private $fhirObservationService;
     private $fhirService;
+    private $fhirValidate;
 
     public function __construct()
     {
         $this->fhirObservationService = new FhirObservationService();
         $this->fhirService = new FhirResourcesService();
+        $this->fhirValidate = new FhirValidationService();
+    }
+
+    /**
+     * Creates a new FHIR observation resource
+     * @param $fhirJson The FHIR observation resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            $object = FhirObservationSerializer::deserialize($fhirJson);
+
+            $processingResult = $this->fhirObservationService->insert($object);
+            return RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+        } catch (\Throwable $e) {
+            $logger = new \OpenEMR\Common\Logging\SystemLogger();
+            $logger->error("FhirObservationRestController::post() fatal error", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'fhirJson' => is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson
+            ]);
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing Observation',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
+    }
+
+    /**
+     * Updates an existing FHIR observation resource
+     * @param $fhirId The FHIR observation resource id (uuid)
+     * @param $fhirJson The updated FHIR observation resource (complete resource)
+     * @returns 200 if the resource is updated, 400 if the resource is invalid
+     */
+    public function put($fhirId, $fhirJson)
+    {
+        $fhirValidate = $this->fhirValidate->validate($fhirJson);
+        if (!empty($fhirValidate)) {
+            return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+        }
+        $object = FhirObservationSerializer::deserialize($fhirJson);
+
+        $processingResult = $this->fhirObservationService->update($fhirId, $object);
+        return RestControllerHelper::handleFhirProcessingResult($processingResult, 200);
     }
 
     /**

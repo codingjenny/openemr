@@ -527,24 +527,33 @@ class FhirPatientService extends FhirServiceBase implements IFhirExportableResou
         $data['uuid'] = (string)$fhirResource->getId() ?? null;
 
         if (!empty($fhirResource->getName())) {
-            $name = new FHIRHumanName();
+            $name = null;
+            // First, try to find official name
             foreach ($fhirResource->getName() as $sub_name) {
                 if ((string)$sub_name->getUse() === 'official') {
                     $name = $sub_name;
                     break;
                 }
             }
-            $data['lname'] = (string)$name->getFamily() ?? null;
+            // If no official name found, use the first name
+            if ($name === null) {
+                $names = $fhirResource->getName();
+                $name = $names[0] ?? null;
+            }
+            
+            if ($name !== null) {
+                $data['lname'] = (string)$name->getFamily() ?? null;
 
-            $given = $name->getGiven() ?? [];
-            // we cast due to the way FHIRString works
-            $data['fname'] = (string)($given[0] ?? null);
-            $data['mname'] = (string)($given[1] ?? null);
+                $given = $name->getGiven() ?? [];
+                // we cast due to the way FHIRString works
+                $data['fname'] = (string)($given[0] ?? null);
+                $data['mname'] = (string)($given[1] ?? null);
 
-            $prefix = $name->getPrefix() ?? [];
-            // we don't support updating the title right now, it requires updating another table which is breaking
-            // the service class.  As far as I can tell, this was never tested and never worked.
-            $data['title'] = $prefix[0] ?? null;
+                $prefix = $name->getPrefix() ?? [];
+                // we don't support updating the title right now, it requires updating another table which is breaking
+                // the service class.  As far as I can tell, this was never tested and never worked.
+                $data['title'] = $prefix[0] ?? null;
+            }
         }
 
         $addresses = $fhirResource->getAddress();

@@ -1128,6 +1128,18 @@
               "admin",
               "super"
             ]
+          },
+          {
+            "label": "FHIR Bundle Test",
+            "menu_id": "fhir_bundle_test",
+            "target": "msc",
+            "url": "/interface/main/fhir_bundle_test.php",
+            "children": [],
+            "requirement": 0,
+            "acl_req": [
+              "admin",
+              "super"
+            ]
           }
         ],
         "requirement": 0,
