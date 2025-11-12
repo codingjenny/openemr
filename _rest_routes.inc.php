@@ -13620,7 +13620,7 @@ RestConfig::$FHIR_ROUTE_MAP = array(
     /**
      *  @OA\Post(
      *      path="/fhir/Bundle",
-     *      description="Processes a FHIR Bundle resource. Supports transaction and batch bundle types.",
+     *      description="Processes a FHIR Bundle resource. Supports transaction and batch bundle types. Can accept either JSON directly or a .json file upload.",
      *      tags={"fhir"},
      *      @OA\RequestBody(
      *          required=true,
@@ -13641,6 +13641,17 @@ RestConfig::$FHIR_ROUTE_MAP = array(
      *                      property="entry",
      *                      type="array",
      *                      description="Array of bundle entries"
+     *                  )
+     *              )
+     *          ),
+     *          @OA\MediaType(
+     *              mediaType="multipart/form-data",
+     *              @OA\Schema(
+     *                  @OA\Property(
+     *                      property="file",
+     *                      description="JSON file containing FHIR Bundle",
+     *                      type="string",
+     *                      format="binary"
      *                  )
      *              )
      *          )
@@ -13665,10 +13676,21 @@ RestConfig::$FHIR_ROUTE_MAP = array(
      */
     "POST /fhir/Bundle" => function (HttpRestRequest $request) {
         RestConfig::authorization_check("patients", "demo");
-        $data = (array) (json_decode(file_get_contents("php://input"), true));
-        $return = (new FhirBundleRestController())->post($data);
-        RestConfig::apiLog($return, $data);
-        return $return;
+        $bundleController = new FhirBundleRestController();
+        
+        // Check if file was uploaded
+        if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
+            // Handle file upload
+            $return = $bundleController->postFromFile($_FILES['file']);
+            RestConfig::apiLog($return, ['file' => $_FILES['file']['name']]);
+            return $return;
+        } else {
+            // Handle direct JSON POST
+            $data = (array) (json_decode(file_get_contents("php://input"), true));
+            $return = $bundleController->post($data);
+            RestConfig::apiLog($return, $data);
+            return $return;
+        }
     },
 
     /**

@@ -40,9 +40,78 @@ class FhirBundleRestController
     }
 
     /**
+     * Processes a FHIR Bundle resource from uploaded file
+     * Supports .json file uploads
+     * @param array $fileData The uploaded file data from $_FILES
+     * @returns 200 if the bundle is processed successfully, 400 if invalid
+     */
+    public function postFromFile($fileData)
+    {
+        try {
+            // Validate file upload
+            if (!isset($fileData['tmp_name']) || !is_uploaded_file($fileData['tmp_name'])) {
+                return RestControllerHelper::responseHandler(
+                    ['error' => 'Invalid file: No file uploaded or file upload failed'],
+                    null,
+                    400
+                );
+            }
+
+            // Check file extension
+            $fileName = $fileData['name'] ?? '';
+            $fileExtension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+            if ($fileExtension !== 'json') {
+                return RestControllerHelper::responseHandler(
+                    ['error' => 'Invalid file type: Only .json files are supported'],
+                    null,
+                    400
+                );
+            }
+
+            // Read and parse JSON file
+            $fileContent = file_get_contents($fileData['tmp_name']);
+            if ($fileContent === false) {
+                return RestControllerHelper::responseHandler(
+                    ['error' => 'Invalid file: Could not read file contents'],
+                    null,
+                    400
+                );
+            }
+
+            $fhirJson = json_decode($fileContent, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return RestControllerHelper::responseHandler(
+                    ['error' => 'Invalid JSON: ' . json_last_error_msg()],
+                    null,
+                    400
+                );
+            }
+
+            // Process the bundle
+            return $this->post($fhirJson);
+        } catch (\Throwable $e) {
+            $this->logger->error("FhirBundleRestController::postFromFile() fatal error", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing bundle file',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
+    }
+
+    /**
      * Processes a FHIR Bundle resource
      * Supports transaction and batch bundle types
-     * @param $fhirJson The FHIR bundle resource
+     * @param $fhirJson The FHIR bundle resource (array)
      * @returns 200 if the bundle is processed successfully, 400 if invalid
      */
     public function post($fhirJson)
@@ -112,16 +181,125 @@ class FhirBundleRestController
             $entries = [];
         }
         $responseEntries = [];
-
-        foreach ($entries as $entry) {
+        
+        // Map to track fullUrl (urn:uuid:xxx) to actual created resource UUID
+        // This allows resources to reference each other within the bundle
+        $uuidMap = [];
+        
+        // First pass: Process entries with fullUrl to build UUID map
+        // This ensures references can be resolved in subsequent entries
+        $entriesToProcess = [];
+        foreach ($entries as $index => $entry) {
+            $fullUrl = $entry['fullUrl'] ?? null;
+            if ($fullUrl && strpos($fullUrl, 'urn:uuid:') === 0) {
+                // This entry has a fullUrl, process it first to build the map
+                try {
+                    // Process without replacing references (uuidMap is still empty)
+                    $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType);
+                    
+                    $this->logger->debug("FhirBundleRestController: Processed entry with fullUrl", [
+                        'fullUrl' => $fullUrl,
+                        'entryResponse' => json_encode($entryResponse),
+                        'responseStatus' => $entryResponse['response']['status'] ?? 'unknown'
+                    ]);
+                    
+                    if ($entryResponse) {
+                        // Extract the created resource UUID from the response
+                        $createdResource = $entryResponse['resource'] ?? null;
+                        $resourceId = null;
+                        
+                        $this->logger->debug("FhirBundleRestController: Extracting UUID from resource", [
+                            'fullUrl' => $fullUrl,
+                            'createdResourceType' => is_object($createdResource) ? get_class($createdResource) : (is_array($createdResource) ? 'array' : 'null'),
+                            'createdResource' => is_array($createdResource) ? json_encode($createdResource) : 'not array'
+                        ]);
+                        
+                        // Handle both object and array formats
+                        if (is_object($createdResource) && method_exists($createdResource, 'getId')) {
+                            $idObj = $createdResource->getId();
+                            if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                                $resourceId = $idObj->getValue();
+                            }
+                        } elseif (is_array($createdResource) && isset($createdResource['id'])) {
+                            $resourceId = $createdResource['id'];
+                        }
+                        
+                        if ($resourceId) {
+                            $uuidMap[$fullUrl] = $resourceId;
+                            $this->logger->debug("FhirBundleRestController: Mapped fullUrl to UUID", [
+                                'fullUrl' => $fullUrl,
+                                'uuid' => $resourceId
+                            ]);
+                        } else {
+                            $this->logger->warning("FhirBundleRestController: Could not extract UUID from resource", [
+                                'fullUrl' => $fullUrl,
+                                'createdResource' => is_array($createdResource) ? json_encode($createdResource) : 'not array'
+                            ]);
+                        }
+                        
+                        $responseEntries[$index] = $entryResponse;
+                    }
+                } catch (\Exception $e) {
+                    $this->logger->error("Failed to process bundle entry with fullUrl", [
+                        'index' => $index,
+                        'fullUrl' => $fullUrl,
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                    $responseEntries[$index] = [
+                        'response' => [
+                            'status' => '500',
+                            'outcome' => [
+                                'resourceType' => 'OperationOutcome',
+                                'issue' => [
+                                    [
+                                        'severity' => 'error',
+                                        'code' => 'exception',
+                                        'diagnostics' => $e->getMessage()
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ];
+                }
+            } else {
+                // This entry doesn't have a fullUrl, process it in second pass
+                $entriesToProcess[$index] = $entry;
+            }
+        }
+        
+        // Second pass: Process remaining entries with UUID references replaced
+        foreach ($entriesToProcess as $index => $entry) {
             try {
-                $entryResponse = $this->processBundleEntryFromJson($entry);
+                // Log UUID map before replacement
+                $this->logger->debug("FhirBundleRestController: Processing entry in second pass", [
+                    'index' => $index,
+                    'uuidMap' => $uuidMap,
+                    'entryResourceType' => $entry['resource']['resourceType'] ?? 'unknown'
+                ]);
+                
+                // Replace urn:uuid references in the resource before processing
+                $entry = $this->replaceUuidReferences($entry, $uuidMap);
+                
+                // Log after replacement
+                $this->logger->debug("FhirBundleRestController: After UUID replacement", [
+                    'index' => $index,
+                    'entryResource' => json_encode($entry['resource'] ?? [])
+                ]);
+                
+                // Process the entry (pass bundle type for auto-inference)
+                $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType);
+                
                 if ($entryResponse) {
-                    $responseEntries[] = $entryResponse;
+                    $responseEntries[$index] = $entryResponse;
                 }
             } catch (\Exception $e) {
-                $this->logger->error("Failed to process bundle entry", ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
-                $responseEntries[] = [
+                $this->logger->error("Failed to process bundle entry", [
+                    'index' => $index,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
+                $responseEntries[$index] = [
                     'response' => [
                         'status' => '500',
                         'outcome' => [
@@ -138,6 +316,10 @@ class FhirBundleRestController
                 ];
             }
         }
+        
+        // Sort response entries by original index to maintain order
+        ksort($responseEntries);
+        $responseEntries = array_values($responseEntries);
 
         // Determine response type based on request type
         // transaction requests return transaction-response
@@ -153,6 +335,160 @@ class FhirBundleRestController
         ];
 
         return $responseBundle;
+    }
+    
+    /**
+     * Replace urn:uuid references in a bundle entry with actual UUIDs from the map
+     * @param array $entry Bundle entry
+     * @param array $uuidMap Map of fullUrl (urn:uuid:xxx) to actual UUID
+     * @return array Entry with replaced references
+     */
+    private function replaceUuidReferences($entry, $uuidMap)
+    {
+        if (!isset($entry['resource'])) {
+            return $entry;
+        }
+        
+        $resource = $entry['resource'];
+        
+        // Ensure resource is an array for processing
+        if (is_object($resource) && method_exists($resource, 'jsonSerialize')) {
+            $resource = $resource->jsonSerialize();
+        } elseif (!is_array($resource)) {
+            $resource = json_decode(json_encode($resource), true);
+        }
+        
+        // Log before replacement
+        $this->logger->debug("FhirBundleRestController: replaceUuidReferences called", [
+            'uuidMapSize' => count($uuidMap),
+            'uuidMap' => $uuidMap,
+            'resourceType' => $resource['resourceType'] ?? 'unknown'
+        ]);
+        
+        // Recursively replace references in the resource (even if uuidMap is empty, we still need to process)
+        $entry['resource'] = $this->replaceReferencesInResource($resource, $uuidMap);
+        
+        return $entry;
+    }
+    
+    /**
+     * Recursively replace urn:uuid references in a resource
+     * @param mixed $data Resource data (array or object)
+     * @param array $uuidMap Map of fullUrl to UUID
+     * @param string|null $parentKey Parent key for context (to determine resource type)
+     * @return mixed Resource with replaced references
+     */
+    private function replaceReferencesInResource($data, $uuidMap, $parentKey = null)
+    {
+        if (is_array($data)) {
+            $result = [];
+            foreach ($data as $key => $value) {
+                // Check if this is a reference field
+                if ($key === 'reference' && is_string($value) && strpos($value, 'urn:uuid:') === 0) {
+                    // Replace urn:uuid reference with actual UUID if available
+                    $this->logger->debug("FhirBundleRestController: Found urn:uuid reference", [
+                        'value' => $value,
+                        'parentKey' => $parentKey,
+                        'uuidMap' => $uuidMap,
+                        'inMap' => isset($uuidMap[$value])
+                    ]);
+                    
+                    if (isset($uuidMap[$value])) {
+                        // Determine resource type from parent key (subject -> Patient, encounter -> Encounter, etc.)
+                        $resourceType = $this->inferResourceTypeFromContext($parentKey);
+                        if ($resourceType) {
+                            $result[$key] = $resourceType . '/' . $uuidMap[$value];
+                        } else {
+                            // Fallback: just use the UUID (service will need to handle it)
+                            $result[$key] = $uuidMap[$value];
+                        }
+                        $this->logger->debug("FhirBundleRestController: Replaced urn:uuid reference", [
+                            'original' => $value,
+                            'replaced' => $result[$key],
+                            'parentKey' => $parentKey,
+                            'resourceType' => $resourceType
+                        ]);
+                    } else {
+                        $this->logger->warning("FhirBundleRestController: urn:uuid reference not found in map", [
+                            'value' => $value,
+                            'parentKey' => $parentKey,
+                            'uuidMapKeys' => array_keys($uuidMap)
+                        ]);
+                        $result[$key] = $value;
+                    }
+                } else {
+                    // Recursively process nested structures, passing current key as parent
+                    $result[$key] = $this->replaceReferencesInResource($value, $uuidMap, $key);
+                }
+            }
+            return $result;
+        } elseif (is_object($data)) {
+            // Convert object to array, process, and convert back if needed
+            $array = json_decode(json_encode($data), true);
+            $processed = $this->replaceReferencesInResource($array, $uuidMap, $parentKey);
+            return $processed;
+        }
+        
+        return $data;
+    }
+    
+    /**
+     * Infer resource type from context key
+     * @param string|null $key Context key (e.g., 'subject', 'encounter', 'performer')
+     * @return string|null Resource type or null
+     */
+    private function inferResourceTypeFromContext($key)
+    {
+        $contextMap = [
+            'subject' => 'Patient',
+            'encounter' => 'Encounter',
+            'performer' => 'Practitioner',
+            'organization' => 'Organization',
+            'practitioner' => 'Practitioner',
+            'patient' => 'Patient',
+        ];
+        
+        return $contextMap[strtolower($key ?? '')] ?? null;
+    }
+    
+    /**
+     * Auto-infer request from resource when request is missing
+     * For transaction/batch bundles, we can infer:
+     * - POST if resource has no id
+     * - PUT if resource has id
+     * - URL from resourceType
+     * @param array|null $resource Resource data
+     * @return array|null Inferred request or null if cannot infer
+     */
+    private function inferRequestFromResource($resource)
+    {
+        if (empty($resource) || !is_array($resource)) {
+            return null;
+        }
+        
+        $resourceType = $resource['resourceType'] ?? null;
+        if (!$resourceType) {
+            return null;
+        }
+        
+        // Check if resource has an id
+        $hasId = !empty($resource['id']);
+        
+        // Infer method: POST for new resources, PUT for existing ones
+        $method = $hasId ? 'PUT' : 'POST';
+        
+        // Infer URL from resourceType
+        $url = $resourceType;
+        
+        // If PUT, include the id in the URL
+        if ($hasId && $method === 'PUT') {
+            $url = $resourceType . '/' . $resource['id'];
+        }
+        
+        return [
+            'method' => $method,
+            'url' => $url
+        ];
     }
 
     /**
@@ -190,15 +526,44 @@ class FhirBundleRestController
     /**
      * Process a single bundle entry from JSON array
      * @param array $entry
+     * @param string $bundleType The bundle type (transaction, batch, etc.)
      * @return array|null Response entry
      */
-    private function processBundleEntryFromJson($entry)
+    private function processBundleEntryFromJson($entry, $bundleType = null)
     {
         $request = $entry['request'] ?? null;
         $resource = $entry['resource'] ?? null;
+        
+        // Ensure resource is an array for processing
+        if (is_object($resource) && method_exists($resource, 'jsonSerialize')) {
+            $resource = $resource->jsonSerialize();
+        } elseif (!is_array($resource) && $resource !== null) {
+            $resource = json_decode(json_encode($resource), true);
+        }
+        
+        // Update entry with converted resource
+        $entry['resource'] = $resource;
+
+        // If no request, try to auto-infer for transaction/batch bundles
+        if (!$request && ($bundleType === 'transaction' || $bundleType === 'batch')) {
+            $request = $this->inferRequestFromResource($resource);
+            if ($request) {
+                $resourceType = null;
+                if (is_array($resource)) {
+                    $resourceType = $resource['resourceType'] ?? null;
+                } elseif (is_object($resource) && method_exists($resource, 'getResourceType')) {
+                    $resourceType = $resource->getResourceType();
+                }
+                $this->logger->debug("FhirBundleRestController: Auto-inferred request", [
+                    'method' => $request['method'],
+                    'url' => $request['url'],
+                    'resourceType' => $resourceType
+                ]);
+            }
+        }
 
         if (!$request) {
-            // If no request, just return the resource
+            // If no request and couldn't infer, just return the resource (for collection, searchset, etc.)
             return [
                 'resource' => $resource
             ];
@@ -217,7 +582,7 @@ class FhirBundleRestController
                             [
                                 'severity' => 'error',
                                 'code' => 'invalid',
-                                'diagnostics' => 'Bundle entry request must have method and url'
+                                'diagnostics' => 'Bundle entry request must have method and url. For transaction/batch bundles, ensure resource has resourceType and optionally id field.'
                             ]
                         ]
                     ]
@@ -270,17 +635,26 @@ class FhirBundleRestController
     private function routeToController($method, $url, $resource)
     {
         // Parse URL to determine resource type
-        // URL format: /fhir/ResourceType or /fhir/ResourceType/{id}
+        // Support multiple URL formats:
+        // - /fhir/ResourceType or /fhir/ResourceType/{id} (full path)
+        // - ResourceType or ResourceType/{id} (relative path, without /fhir prefix)
         $urlParts = explode('/', trim($url, '/'));
-        if (count($urlParts) < 2 || $urlParts[0] !== 'fhir') {
-            throw new \Exception("Invalid URL format: $url");
+        
+        $resourceType = null;
+        $resourceId = null;
+        
+        if (count($urlParts) >= 2 && $urlParts[0] === 'fhir') {
+            // Full path format: /fhir/ResourceType or /fhir/ResourceType/{id}
+            $resourceType = $urlParts[1] ?? null;
+            $resourceId = $urlParts[2] ?? null;
+        } elseif (count($urlParts) >= 1) {
+            // Relative path format: ResourceType or ResourceType/{id}
+            $resourceType = $urlParts[0] ?? null;
+            $resourceId = $urlParts[1] ?? null;
         }
-
-        $resourceType = $urlParts[1] ?? null;
-        $resourceId = $urlParts[2] ?? null;
-
+        
         if (!$resourceType) {
-            throw new \Exception("Resource type not found in URL: $url");
+            throw new \Exception("Invalid URL format: $url. Expected format: /fhir/ResourceType or ResourceType");
         }
 
         // getResource() already returns jsonSerialize() result (array), so use it directly
@@ -339,9 +713,18 @@ class FhirBundleRestController
                 // Capture status code before calling controller
                 $statusCode = null;
                 $result = $controller->post($resourceArray);
-                // handleFhirProcessingResult sets http_response_code and returns array
+                // handleFhirProcessingResult sets http_response_code and returns FHIR resource object or array
                 $statusCode = http_response_code() ?: 201;
-                $body = is_array($result) ? $result : null;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
                 
                 // Check for validation errors
                 if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
@@ -352,9 +735,20 @@ class FhirBundleRestController
                     $statusCode = 404;
                 }
                 
+                // Extract ID from FHIR resource if it's an object
+                $resourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $resourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $resourceId = $body['id'];
+                }
+                
                 return [
                     'status' => (string)$statusCode,
-                    'location' => isset($body['id']) ? '/fhir/Patient/' . $body['id'] : null,
+                    'location' => $resourceId ? '/fhir/Patient/' . $resourceId : null,
                     'resource' => $body
                 ];
             } elseif ($method === 'PUT' && $resourceId) {
