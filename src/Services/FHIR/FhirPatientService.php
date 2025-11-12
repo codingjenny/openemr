@@ -637,7 +637,34 @@ class FhirPatientService extends FhirServiceBase implements IFhirExportableResou
      */
     public function insertOpenEMRRecord($openEmrRecord)
     {
-        return $this->patientService->insert($openEmrRecord);
+        $processingResult = $this->patientService->insert($openEmrRecord);
+        
+        // Convert saved patient to FHIR resource (similar to EncounterService::insertEncounter)
+        if ($processingResult->isValid() && count($processingResult->getData()) > 0) {
+            $savedPatient = $processingResult->getData()[0];
+            if (!empty($savedPatient) && !empty($savedPatient['uuid'])) {
+                // Get the complete OpenEMR patient record using patientService->getOne()
+                // This returns OpenEMR record (array), not FHIR resource
+                $completePatientResult = $this->patientService->getOne($savedPatient['uuid']);
+                if ($completePatientResult->hasData() && count($completePatientResult->getData()) > 0) {
+                    $completePatient = $completePatientResult->getData()[0];
+                    // Ensure it's an array (OpenEMR record format)
+                    if (!is_array($completePatient)) {
+                        $completePatient = json_decode(json_encode($completePatient), true);
+                    }
+                    // Convert complete OpenEMR patient record to FHIR resource
+                    $fhirResource = $this->parseOpenEMRRecord($completePatient, false);
+                    $processingResult->setData([]);
+                    $processingResult->addData($fhirResource);
+                } else {
+                    // Fallback: if getOne fails, try to convert with minimal data
+                    // This should not happen, but provides a fallback
+                    $processingResult->addInternalError("Failed to retrieve complete patient record after insert");
+                }
+            }
+        }
+        
+        return $processingResult;
     }
 
 

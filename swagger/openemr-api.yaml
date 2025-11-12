@@ -6956,7 +6956,7 @@ paths:
     post:
       tags:
         - fhir
-      description: 'Processes a FHIR Bundle resource. Supports transaction and batch bundle types.'
+      description: 'Processes a FHIR Bundle resource. Supports transaction and batch bundle types. Can accept either JSON directly or a .json file upload.'
       requestBody:
         required: true
         content:
@@ -6972,6 +6972,14 @@ paths:
                 entry:
                   description: 'Array of bundle entries'
                   type: array
+              type: object
+          multipart/form-data:
+            schema:
+              properties:
+                file:
+                  description: 'JSON file containing FHIR Bundle'
+                  type: string
+                  format: binary
               type: object
       responses:
         '200':

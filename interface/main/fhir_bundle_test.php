@@ -206,26 +206,51 @@ $site_id = $_SESSION['site_id'] ?? 'default';
         <div class="info-box">
             <strong><?php echo xlt('API 端點'); ?>：</strong> /apis/<?php echo htmlspecialchars($site_id); ?>/fhir/Bundle<br>
             <strong><?php echo xlt('方法'); ?>：</strong> POST<br>
-            <strong><?php echo xlt('內容類型'); ?>：</strong> application/json<br>
-            <strong><?php echo xlt('提示'); ?>：</strong> Observation 資源需要引用已存在的 Patient。如果使用 Patient + Observation 範例，請先執行一次只包含 Patient 的 Bundle，然後用返回的 Patient UUID 更新 Observation 的 subject 欄位。
+            <strong><?php echo xlt('支援方式'); ?>：</strong> 直接 POST JSON 或上傳 .json 檔案<br>
+            <strong><?php echo xlt('提示'); ?>：</strong> 使用 Patient + Observation 範例時，系統會自動處理 Bundle 內的資源引用。
         </div>
         
-        <form id="bundleForm">
+        <form id="bundleForm" enctype="multipart/form-data">
             <div class="form-group">
+                <label>
+                    <?php echo xlt('上傳方式'); ?>
+                </label>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: inline-flex; align-items: center; margin-right: 20px; cursor: pointer;">
+                        <input type="radio" name="uploadType" value="json" checked onchange="toggleUploadType()" style="margin-right: 5px;">
+                        <?php echo xlt('直接輸入 JSON'); ?>
+                    </label>
+                    <label style="display: inline-flex; align-items: center; cursor: pointer;">
+                        <input type="radio" name="uploadType" value="file" onchange="toggleUploadType()" style="margin-right: 5px;">
+                        <?php echo xlt('上傳 .json 檔案'); ?>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="form-group" id="jsonInputGroup">
                 <label for="bundleJson">
                     <?php echo xlt('Bundle JSON'); ?> 
                     <span style="margin-left: 10px;">
                         <a href="#" class="example-link" onclick="loadExample('patient'); return false;"><?php echo xlt('範例：Patient'); ?></a> | 
-                        <a href="#" class="example-link" onclick="loadExample('observation'); return false;"><?php echo xlt('範例：Observation'); ?></a> | 
                         <a href="#" class="example-link" onclick="loadExample('patient_observation'); return false;"><?php echo xlt('範例：Patient + Observation'); ?></a>
                     </span>
                 </label>
                 <textarea id="bundleJson" name="bundleJson" placeholder='<?php echo xlt('請輸入 FHIR Bundle JSON'); ?>'></textarea>
             </div>
             
+            <div class="form-group" id="fileInputGroup" style="display: none;">
+                <label for="bundleFile">
+                    <?php echo xlt('選擇 .json 檔案'); ?>
+                </label>
+                <input type="file" id="bundleFile" name="file" accept=".json,application/json" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%;">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    <?php echo xlt('僅支援 .json 格式檔案'); ?>
+                </small>
+            </div>
+            
             <div class="button-group">
                 <button type="submit" class="btn btn-primary"><?php echo xlt('發送請求'); ?></button>
-                <button type="button" class="btn btn-secondary" onclick="formatJson()"><?php echo xlt('格式化 JSON'); ?></button>
+                <button type="button" class="btn btn-secondary" onclick="formatJson()" id="formatBtn"><?php echo xlt('格式化 JSON'); ?></button>
                 <button type="button" class="btn btn-danger" onclick="clearForm()"><?php echo xlt('清除'); ?></button>
             </div>
         </form>
@@ -250,37 +275,81 @@ $site_id = $_SESSION['site_id'] ?? 'default';
         const siteId = <?php echo js_escape($site_id); ?>;
         const csrfToken = <?php echo js_escape(CsrfUtils::collectCsrfToken('api')); ?>;
         
+        function toggleUploadType() {
+            const uploadType = document.querySelector('input[name="uploadType"]:checked').value;
+            const jsonInputGroup = document.getElementById('jsonInputGroup');
+            const fileInputGroup = document.getElementById('fileInputGroup');
+            const formatBtn = document.getElementById('formatBtn');
+            
+            if (uploadType === 'json') {
+                jsonInputGroup.style.display = 'block';
+                fileInputGroup.style.display = 'none';
+                formatBtn.style.display = 'inline-block';
+            } else {
+                jsonInputGroup.style.display = 'none';
+                fileInputGroup.style.display = 'block';
+                formatBtn.style.display = 'none';
+            }
+        }
+        
         document.getElementById('bundleForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
-            const bundleJson = document.getElementById('bundleJson').value.trim();
-            if (!bundleJson) {
-                alert(<?php echo xlj('請輸入 Bundle JSON'); ?>);
-                return;
-            }
-            
-            // Validate JSON
-            let jsonData;
-            try {
-                jsonData = JSON.parse(bundleJson);
-            } catch (error) {
-                alert(<?php echo xlj('JSON 格式錯誤'); ?> + ': ' + error.message);
-                return;
-            }
+            const uploadType = document.querySelector('input[name="uploadType"]:checked').value;
             
             // Show loading
             document.getElementById('loading').style.display = 'block';
             document.getElementById('resultContainer').style.display = 'none';
             
             try {
-                const response = await fetch(`/apis/${siteId}/fhir/Bundle`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'APICSRFTOKEN': csrfToken
-                    },
-                    body: bundleJson
-                });
+                let response;
+                
+                if (uploadType === 'file') {
+                    // Handle file upload
+                    const fileInput = document.getElementById('bundleFile');
+                    if (!fileInput.files || !fileInput.files[0]) {
+                        alert(<?php echo xlj('請選擇一個 .json 檔案'); ?>);
+                        document.getElementById('loading').style.display = 'none';
+                        return;
+                    }
+                    
+                    const formData = new FormData();
+                    formData.append('file', fileInput.files[0]);
+                    
+                    response = await fetch(`/apis/${siteId}/fhir/Bundle`, {
+                        method: 'POST',
+                        headers: {
+                            'APICSRFTOKEN': csrfToken
+                        },
+                        body: formData
+                    });
+                } else {
+                    // Handle direct JSON POST
+                    const bundleJson = document.getElementById('bundleJson').value.trim();
+                    if (!bundleJson) {
+                        alert(<?php echo xlj('請輸入 Bundle JSON'); ?>);
+                        document.getElementById('loading').style.display = 'none';
+                        return;
+                    }
+                    
+                    // Validate JSON
+                    try {
+                        JSON.parse(bundleJson);
+                    } catch (error) {
+                        alert(<?php echo xlj('JSON 格式錯誤'); ?> + ': ' + error.message);
+                        document.getElementById('loading').style.display = 'none';
+                        return;
+                    }
+                    
+                    response = await fetch(`/apis/${siteId}/fhir/Bundle`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'APICSRFTOKEN': csrfToken
+                        },
+                        body: bundleJson
+                    });
+                }
                 
                 let parsedData;
                 const contentType = response.headers.get('content-type');
@@ -349,6 +418,10 @@ $site_id = $_SESSION['site_id'] ?? 'default';
         function clearForm() {
             if (confirm(<?php echo xlj('確定要清除所有內容嗎？'); ?>)) {
                 document.getElementById('bundleJson').value = '';
+                const fileInput = document.getElementById('bundleFile');
+                if (fileInput) {
+                    fileInput.value = '';
+                }
                 document.getElementById('resultContainer').style.display = 'none';
             }
         }
@@ -362,10 +435,7 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                     "type": "transaction",
                     "entry": [
                         {
-                            "request": {
-                                "method": "POST",
-                                "url": "/fhir/Patient"
-                            },
+                            "fullUrl": "urn:uuid:patient-001",
                             "resource": {
                                 "resourceType": "Patient",
                                 "name": [
@@ -399,65 +469,13 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         }
                     ]
                 };
-            } else if (type === 'observation') {
-                example = {
-                    "resourceType": "Bundle",
-                    "type": "transaction",
-                    "entry": [
-                        {
-                            "request": {
-                                "method": "POST",
-                                "url": "/fhir/Observation"
-                            },
-                            "resource": {
-                                "resourceType": "Observation",
-                                "status": "final",
-                                "code": {
-                                    "coding": [
-                                        {
-                                            "system": "http://loinc.org",
-                                            "code": "8480-6",
-                                            "display": "Systolic blood pressure"
-                                        }
-                                    ],
-                                    "text": "Systolic blood pressure"
-                                },
-                                "subject": {
-                                    "reference": "Patient/REPLACE_WITH_PATIENT_UUID",
-                                    "display": "Patient"
-                                },
-                                "effectiveDateTime": "2024-01-15T10:30:00Z",
-                                "valueQuantity": {
-                                    "value": 120,
-                                    "unit": "mmHg",
-                                    "system": "http://unitsofmeasure.org",
-                                    "code": "mm[Hg]"
-                                },
-                                "category": [
-                                    {
-                                        "coding": [
-                                            {
-                                                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
-                                                "code": "vital-signs",
-                                                "display": "Vital Signs"
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                };
             } else if (type === 'patient_observation') {
                 example = {
                     "resourceType": "Bundle",
                     "type": "transaction",
                     "entry": [
                         {
-                            "request": {
-                                "method": "POST",
-                                "url": "/fhir/Patient"
-                            },
+                            "fullUrl": "urn:uuid:patient-001",
                             "resource": {
                                 "resourceType": "Patient",
                                 "name": [
@@ -468,14 +486,16 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                     }
                                 ],
                                 "gender": "female",
-                                "birthDate": "1985-05-20"
+                                "birthDate": "1985-05-20",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0923456789"
+                                    }
+                                ]
                             }
                         },
                         {
-                            "request": {
-                                "method": "POST",
-                                "url": "/fhir/Observation"
-                            },
                             "resource": {
                                 "resourceType": "Observation",
                                 "status": "final",
@@ -490,7 +510,7 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                     "text": "Systolic blood pressure"
                                 },
                                 "subject": {
-                                    "reference": "Patient/REPLACE_WITH_PATIENT_UUID",
+                                    "reference": "urn:uuid:patient-001",
                                     "display": "Patient"
                                 },
                                 "effectiveDateTime": "2024-01-15T10:30:00Z",
