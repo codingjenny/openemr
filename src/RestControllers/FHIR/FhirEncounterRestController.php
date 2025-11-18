@@ -14,21 +14,107 @@ namespace OpenEMR\RestControllers\FHIR;
 
 use OpenEMR\Services\FHIR\FhirEncounterService;
 use OpenEMR\Services\FHIR\FhirResourcesService;
+use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
 
 class FhirEncounterRestController
 {
     private $fhirEncounterService;
     private $fhirService;
+    private $fhirValidate;
 
     public function __construct()
     {
         $this->fhirEncounterService = new FhirEncounterService();
         $this->fhirService = new FhirResourcesService();
+        $this->fhirValidate = new FhirValidationService();
     }
 
-    // implement put post in future
+    /**
+     * Creates a new FHIR encounter resource
+     * @param $fhirJson The FHIR encounter resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIREncounter object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty Encounter resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            if (!($fhirResource instanceof \OpenEMR\FHIR\R4\FHIRDomainResource\FHIREncounter)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Resource must be of type Encounter'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+
+            $processingResult = $this->fhirEncounterService->insert($fhirResource);
+            $result = RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+            
+            // Convert FHIR object to array for Bundle processing
+            // handleFhirProcessingResult returns a FHIR resource object, but Bundle needs an array
+            if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                return $result->jsonSerialize();
+            }
+            
+            return $result;
+        } catch (\Throwable $e) {
+            $logger = new \OpenEMR\Common\Logging\SystemLogger();
+            $logger->error("FhirEncounterRestController::post() fatal error", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'fhirJson' => is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson
+            ]);
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing Encounter',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
+    }
 
     /**
      * Queries for a single FHIR encounter resource by FHIR id

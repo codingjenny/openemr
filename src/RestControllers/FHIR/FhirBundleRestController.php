@@ -194,7 +194,11 @@ class FhirBundleRestController
             if ($fullUrl && strpos($fullUrl, 'urn:uuid:') === 0) {
                 // This entry has a fullUrl, process it first to build the map
                 try {
-                    // Process without replacing references (uuidMap is still empty)
+                    // Replace urn:uuid references in the resource before processing
+                    // This allows later entries in the first pass to reference earlier ones
+                    $entry = $this->replaceUuidReferences($entry, $uuidMap);
+                    
+                    // Process the entry
                     $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType);
                     
                     $this->logger->debug("FhirBundleRestController: Processed entry with fullUrl", [
@@ -593,6 +597,17 @@ class FhirBundleRestController
         // Route to appropriate controller based on URL
         try {
             $result = $this->routeToController($methodValue, $urlValue, $resource);
+            
+            // Log the result for debugging
+            $this->logger->debug("FhirBundleRestController::processBundleEntryFromJson() routeToController result", [
+                'method' => $methodValue,
+                'url' => $urlValue,
+                'resultKeys' => is_array($result) ? array_keys($result) : 'not array',
+                'hasResource' => isset($result['resource']),
+                'resourceType' => is_array($result['resource'] ?? null) ? (gettype($result['resource'])) : 'not array',
+                'resourceIsEmpty' => empty($result['resource'] ?? null)
+            ]);
+            
             return [
                 'response' => [
                     'status' => $result['status'],
@@ -683,6 +698,8 @@ class FhirBundleRestController
                 return $this->processOrganizationResource($method, $resourceId, $resourceArray);
             case 'practitioner':
                 return $this->processPractitionerResource($method, $resourceId, $resourceArray);
+            case 'encounter':
+                return $this->processEncounterResource($method, $resourceId, $resourceArray);
             default:
                 // For unsupported resource types, return a not-supported response
                 return [
@@ -1072,6 +1089,115 @@ class FhirBundleRestController
             }
         } catch (\Exception $e) {
             $this->logger->error("Failed to process Practitioner resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Process Encounter resource
+     */
+    private function processEncounterResource($method, $resourceId, $resourceArray)
+    {
+        $controller = new FhirEncounterRestController();
+        
+        try {
+            if ($method === 'POST') {
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // FhirEncounterRestController::post() returns an array (already converted from object)
+                $body = is_array($result) ? $result : null;
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                    $this->logger->warning("FhirBundleRestController::processEncounterResource() validation errors", [
+                        'validationErrors' => $body['validationErrors']
+                    ]);
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                    $this->logger->error("FhirBundleRestController::processEncounterResource() internal errors", [
+                        'internalErrors' => $body['internalErrors']
+                    ]);
+                } elseif (empty($body) || !isset($body['resourceType'])) {
+                    $statusCode = 500;
+                    $this->logger->error("FhirBundleRestController::processEncounterResource() invalid or empty body returned", [
+                        'resultType' => gettype($result),
+                        'body' => $body
+                    ]);
+                    return [
+                        'status' => (string)$statusCode,
+                        'outcome' => [
+                            'resourceType' => 'OperationOutcome',
+                            'issue' => [
+                                [
+                                    'severity' => 'error',
+                                    'code' => 'exception',
+                                    'diagnostics' => 'Encounter creation returned invalid or empty response. Check server logs for details.'
+                                ]
+                            ]
+                        ]
+                    ];
+                }
+                
+                // Extract ID from FHIR resource
+                $resourceId = $body['id'] ?? null;
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $resourceId ? '/fhir/Encounter/' . $resourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                // PUT not yet implemented for Encounter
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "PUT method not yet supported for Encounter resource"
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '400',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => "Method '$method' not supported for Encounter resource"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process Encounter resource", [
                 'method' => $method,
                 'resourceId' => $resourceId,
                 'error' => $e->getMessage(),

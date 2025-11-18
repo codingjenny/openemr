@@ -9,7 +9,10 @@ use OpenEMR\Common\Uuid\UuidMapping;
 use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\Services\BaseService;
 use OpenEMR\Services\EncounterService;
+use OpenEMR\Services\FacilityService;
 use OpenEMR\Services\FormService;
+use OpenEMR\Services\ListService;
+use OpenEMR\Services\PatientService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationLaboratoryService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationSocialHistoryService;
 use OpenEMR\Services\FHIR\Observation\FhirObservationVitalsService;
@@ -555,6 +558,151 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
     }
 
     /**
+     * Creates a default encounter for observation if none exists.
+     * 
+     * NOTE: This method is ONLY used for Web Interface requests as a fallback.
+     * For API requests, users MUST provide an encounter reference in the FHIR Observation resource.
+     * 
+     * Note: We use EncounterService::insertEncounter() directly instead of FhirEncounterService
+     * because FhirEncounterService currently only supports reading/searching encounters
+     * (it uses FhirServiceBaseEmptyTrait which has empty insertOpenEMRRecord implementation).
+     * 
+     * This method follows the same logic as the UI (interface/forms/newpatient/save.php)
+     * to ensure all required fields are properly set.
+     *
+     * @param int $pid Patient ID
+     * @return int|null The encounter ID, or null if creation failed
+     */
+    private function createDefaultEncounterForObservation($pid)
+    {
+        try {
+            // Get patient UUID (required for EncounterService)
+            $patientService = new PatientService();
+            $patient = $patientService->findByPid($pid);
+            if (empty($patient) || empty($patient['uuid'])) {
+                throw new \Exception("Patient not found or missing UUID for pid: " . $pid);
+            }
+            $puuid = UuidRegistry::uuidToString($patient['uuid']);
+            
+            // Get default values following the same logic as UI (interface/forms/newpatient/save.php)
+            $today = date('Y-m-d');
+            $userId = (isset($_SESSION) && isset($_SESSION['authUserID'])) ? $_SESSION['authUserID'] : 1;
+            $userName = (isset($_SESSION) && isset($_SESSION['authUser'])) ? $_SESSION['authUser'] : 'admin';
+            $userGroup = (isset($_SESSION) && isset($_SESSION['authProvider'])) ? $_SESSION['authProvider'] : 'Default';
+            
+            // Get default facility (from user or primary facility)
+            $facilityService = new FacilityService();
+            $facility_id = null;
+            $facility = null;
+            $billing_facility = null;
+            $pos_code = null;
+            
+            if ($userId > 0) {
+                $userFacility = $facilityService->getFacilityForUser($userId);
+                if (!empty($userFacility)) {
+                    $facility_id = $userFacility['id'] ?? null;
+                    $facility = $userFacility['name'] ?? null;
+                    $billing_facility = $userFacility['id'] ?? null;
+                }
+            }
+            
+            // If no facility from user, get primary facility
+            if (empty($facility_id)) {
+                $primaryFacility = $facilityService->getPrimaryBusinessEntity();
+                if (!empty($primaryFacility)) {
+                    $facility_id = $primaryFacility['id'] ?? null;
+                    $facility = $primaryFacility['name'] ?? null;
+                    $billing_facility = $primaryFacility['id'] ?? null;
+                }
+            }
+            
+            // Get pos_code from facility
+            if (!empty($facility_id)) {
+                $pos_code = $this->encounterService->getPosCode($facility_id);
+            }
+            
+            // Get default class_code (required field) - same logic as UI
+            $listService = new ListService();
+            $class_code = null;
+            $classOptions = $listService->getOptionsByListName('_ActEncounterCode');
+            if (!empty($classOptions)) {
+                // Find the default
+                foreach ($classOptions as $code) {
+                    if (!empty($code['is_default'])) {
+                        $class_code = $code['option_id'];
+                        break;
+                    }
+                }
+                // If no default, use first entry
+                if (empty($class_code) && !empty($classOptions[0])) {
+                    $class_code = $classOptions[0]['option_id'];
+                }
+            }
+            // Fallback to default if still empty
+            if (empty($class_code)) {
+                $class_code = EncounterService::DEFAULT_CLASS_CODE; // 'AMB'
+            }
+            
+            // Get default pc_catid (visit category) - required field
+            // Try to get first available visit category
+            $pc_catid = null;
+            $visitCategories = QueryUtils::fetchRecords(
+                "SELECT pc_catid FROM openemr_postcalendar_categories WHERE pc_active = 1 ORDER BY pc_catid LIMIT 1",
+                []
+            );
+            if (!empty($visitCategories) && !empty($visitCategories[0]['pc_catid'])) {
+                $pc_catid = $visitCategories[0]['pc_catid'];
+            }
+            
+            // Prepare encounter data matching UI structure (interface/forms/newpatient/save.php)
+            $encounterData = [
+                'date' => $today,
+                'reason' => 'FHIR Observation Entry',
+                'facility_id' => $facility_id,
+                'facility' => $facility,
+                'billing_facility' => $billing_facility,
+                'class_code' => $class_code,
+                'pc_catid' => $pc_catid,
+                'pos_code' => $pos_code,
+                'provider_id' => $userId,
+                'user' => $userName,
+                'group' => $userGroup,
+            ];
+            
+            // Use EncounterService to create encounter (same as UI does)
+            $encounterResult = $this->encounterService->insertEncounter($puuid, $encounterData);
+            
+            if ($encounterResult->isValid() && $encounterResult->hasData()) {
+                $encounterData = $encounterResult->getFirstDataResult();
+                $encounterId = $encounterData['eid'] ?? $encounterData['encounter'] ?? null;
+                
+                $this->logger->info("Created encounter for observation using EncounterService", [
+                    'pid' => $pid,
+                    'puuid' => $puuid,
+                    'encounter' => $encounterId,
+                    'euuid' => $encounterData['euuid'] ?? null
+                ]);
+                
+                return $encounterId;
+            } else {
+                $validationMessages = $encounterResult->getValidationMessages();
+                $internalErrors = $encounterResult->getInternalErrors();
+                throw new \Exception("Failed to create encounter: " . json_encode([
+                    'validation' => $validationMessages,
+                    'errors' => $internalErrors
+                ]));
+            }
+        } catch (\Throwable $e) {
+            $this->logger->error("Failed to create encounter using EncounterService", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'pid' => $pid
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Inserts an OpenEMR observation record into the system.
      *
      * @param array $openEmrRecord OpenEMR observation record
@@ -571,12 +719,17 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
                 return $processingResult;
             }
 
+            // Validate encounter - it should be provided by the user in the FHIR resource
+            // The encounter should be extracted from Observation.encounter field in parseFhirResource()
             if (empty($openEmrRecord['encounter'])) {
-                // Try to get from session (for web interface)
-                $openEmrRecord['encounter'] = (isset($_SESSION) && isset($_SESSION['encounter'])) ? $_SESSION['encounter'] : null;
+                // Check if this is a web interface request (has session with encounter context)
+                $isWebInterface = isset($_SESSION) && isset($_SESSION['encounter']) && !empty($_SESSION['encounter']);
                 
-                // If still no encounter, try to get an existing encounter for today
-                if (empty($openEmrRecord['encounter']) && !empty($openEmrRecord['pid'])) {
+                if ($isWebInterface) {
+                    // For web interface, use session encounter
+                    $openEmrRecord['encounter'] = $_SESSION['encounter'];
+                } elseif (isset($_SESSION) && isset($_SESSION['pid']) && $_SESSION['pid'] == $openEmrRecord['pid']) {
+                    // Web interface but no encounter in session - try to find today's encounter
                     try {
                         $today = date('Y-m-d');
                         $existingEncounter = QueryUtils::fetchRecords(
@@ -586,6 +739,10 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
                         
                         if (!empty($existingEncounter) && !empty($existingEncounter[0])) {
                             $openEmrRecord['encounter'] = $existingEncounter[0]['encounter'];
+                            $this->logger->info("Using today's existing encounter for web interface observation", [
+                                'pid' => $openEmrRecord['pid'],
+                                'encounter' => $openEmrRecord['encounter']
+                            ]);
                         }
                     } catch (\Throwable $e) {
                         $this->logger->error("Failed to get existing encounter for observation", [
@@ -594,122 +751,39 @@ class FhirObservationService extends FhirServiceBase implements IResourceSearcha
                             'pid' => $openEmrRecord['pid']
                         ]);
                     }
-                }
-                
-                // If still no encounter, we need to create one or use a default
-                // Note: saveObservationRecord requires encounter for addForm() call
-                if (empty($openEmrRecord['encounter'])) {
-                    // Try to create a minimal encounter using direct SQL to avoid API issues
-                    try {
-                        $today = date('Y-m-d');
-                        $userId = (isset($_SESSION) && isset($_SESSION['authUserID'])) ? $_SESSION['authUserID'] : 1; // Default to user ID 1 if not set
-                        $userName = (isset($_SESSION) && isset($_SESSION['authUser'])) ? $_SESSION['authUser'] : 'admin';
-                        $userGroup = (isset($_SESSION) && isset($_SESSION['authProvider'])) ? $_SESSION['authProvider'] : 'Default';
-                        
-                        // Generate encounter ID safely using database sequence (same as EncounterService)
-                        // Use the same method as EncounterService::insertEncounter() which uses generate_id()
-                        // Since generate_id() may not be available in API context, use database GenID directly
-                        try {
-                            $db = $GLOBALS['adodb']['db'] ?? null;
-                            if ($db && method_exists($db, 'GenID')) {
-                                $newEncounter = $db->GenID("sequences");
-                            } else {
-                                // Fallback: use max + 1 (with potential race condition, but acceptable for API use)
-                                $maxEncounter = QueryUtils::fetchRecords(
-                                    "SELECT MAX(CAST(encounter AS UNSIGNED)) as max_enc FROM form_encounter",
-                                    []
-                                );
-                                $newEncounter = 1;
-                                if (!empty($maxEncounter) && !empty($maxEncounter[0]['max_enc'])) {
-                                    $newEncounter = intval($maxEncounter[0]['max_enc']) + 1;
-                                }
-                            }
-                        } catch (\Exception $e) {
-                            // Fallback to max + 1 if GenID fails
-                            $maxEncounter = QueryUtils::fetchRecords(
-                                "SELECT MAX(CAST(encounter AS UNSIGNED)) as max_enc FROM form_encounter",
-                                []
-                            );
-                            $newEncounter = 1;
-                            if (!empty($maxEncounter) && !empty($maxEncounter[0]['max_enc'])) {
-                                $newEncounter = intval($maxEncounter[0]['max_enc']) + 1;
-                            }
-                        }
-                        
-                        // Insert minimal encounter record
-                        $encounterUuid = (new UuidRegistry(['table_name' => 'form_encounter']))->createUuid();
-                        $encounterUuidBytes = UuidRegistry::uuidToBytes($encounterUuid);
-                        $encounterInsert = QueryUtils::sqlInsert(
-                            "INSERT INTO form_encounter SET 
-                                encounter = ?,
-                                uuid = ?,
-                                date = ?,
-                                pid = ?,
-                                reason = ?,
-                                provider_id = ?,
-                                user = ?,
-                                `group` = ?",
-                            [
-                                $newEncounter,
-                                $encounterUuidBytes,
-                                $today,
-                                $openEmrRecord['pid'],
-                                'FHIR Observation Entry',
-                                $userId,
-                                $userName,
-                                $userGroup
-                            ]
-                        );
-                        
-                        if ($encounterInsert) {
-                            // Also add form entry (same as EncounterService does)
-                            // Use FormService to ensure consistency with existing code
-                            try {
-                                $formService = new FormService();
-                                // Note: addForm expects form_id (which is form_encounter.id from the insert)
-                                // This matches EncounterService::insertEncounter() behavior
-                                $formService->addForm(
-                                    $newEncounter,        // encounter number
-                                    "New Patient Encounter", // form_name
-                                    $encounterInsert,     // form_id (form_encounter.id returned from INSERT)
-                                    "newpatient",         // formdir
-                                    $openEmrRecord['pid'], // pid
-                                    1,                   // authorized
-                                    $today,              // date
-                                    $userName,           // user
-                                    $userGroup           // group
-                                );
-                            } catch (\Exception $formException) {
-                                // If FormService fails, log but don't fail the observation
-                                // The encounter is already created, so observation can still be saved
-                                $this->logger->warning("Failed to add form entry for encounter (non-critical)", [
-                                    'error' => $formException->getMessage(),
-                                    'encounter' => $newEncounter,
-                                    'pid' => $openEmrRecord['pid']
-                                ]);
-                            }
-                            
-                            $openEmrRecord['encounter'] = $newEncounter;
-                            $this->logger->info("Created minimal encounter for observation", [
+                    
+                    // For web interface, if still no encounter, create one as fallback
+                    if (empty($openEmrRecord['encounter'])) {
+                        $createdEncounter = $this->createDefaultEncounterForObservation($openEmrRecord['pid']);
+                        if (!empty($createdEncounter)) {
+                            $openEmrRecord['encounter'] = $createdEncounter;
+                            $this->logger->info("Created default encounter for web interface observation", [
                                 'pid' => $openEmrRecord['pid'],
-                                'encounter' => $newEncounter
+                                'encounter' => $openEmrRecord['encounter']
                             ]);
                         }
-                    } catch (\Throwable $e) {
-                        $this->logger->error("Failed to create minimal encounter", [
-                            'error' => $e->getMessage(),
-                            'trace' => $e->getTraceAsString(),
-                            'pid' => $openEmrRecord['pid']
-                        ]);
                     }
                 }
                 
-                // Final fallback: if still no encounter, use 0 (may cause issues but better than NULL)
+                // For API requests (not web interface), encounter MUST be provided in FHIR resource
+                // If user didn't provide encounter in Observation.encounter field, return validation error
                 if (empty($openEmrRecord['encounter'])) {
-                    $this->logger->warning("No encounter available, using 0 as fallback", [
-                        'pid' => $openEmrRecord['pid']
+                    $errorMessage = 'Encounter is required for Observation. ';
+                    $errorMessage .= 'Please provide an encounter reference: Observation.encounter.reference = "Encounter/{encounter-uuid}". ';
+                    $errorMessage .= 'You can reference an existing Encounter, or create a new Encounter in the same FHIR Bundle. ';
+                    $errorMessage .= 'To create an Encounter in a Bundle, include it as a separate entry before the Observation entry. ';
+                    $errorMessage .= 'Required fields for Encounter creation: subject (Patient reference), class (encounter class code), status. ';
+                    $errorMessage .= 'Optional but recommended: serviceProvider (Facility/Organization), participant (Practitioner), period (date).';
+                    
+                    $processingResult->setValidationMessages([
+                        'encounter' => $errorMessage
                     ]);
-                    $openEmrRecord['encounter'] = 0;
+                    $this->logger->warning("Observation creation failed: missing encounter reference", [
+                        'pid' => $openEmrRecord['pid'] ?? null,
+                        'context' => 'API request - encounter must be provided in FHIR resource',
+                        'note' => 'Encounter can be created via FHIR Bundle or must reference existing Encounter'
+                    ]);
+                    return $processingResult;
                 }
             }
 
