@@ -233,7 +233,8 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                     <span style="margin-left: 10px;">
                         <a href="#" class="example-link" onclick="loadExample('patient'); return false;"><?php echo xlt('範例：Patient'); ?></a> | 
                         <a href="#" class="example-link" onclick="loadExample('patient_observation'); return false;"><?php echo xlt('範例：Patient + Observation'); ?></a> |
-                        <a href="#" class="example-link" onclick="loadExample('patient_encounter_observation'); return false;"><?php echo xlt('範例：Patient + Encounter + Observation'); ?></a>
+                        <a href="#" class="example-link" onclick="loadExample('patient_encounter_observation'); return false;"><?php echo xlt('範例：Patient + Encounter + Observation'); ?></a> |
+                        <a href="#" class="example-link" onclick="loadExample('multiple_patients'); return false;"><?php echo xlt('範例：多個 Patient'); ?></a>
                     </span>
                 </label>
                 <textarea id="bundleJson" name="bundleJson" placeholder='<?php echo xlt('請輸入 FHIR Bundle JSON'); ?>'></textarea>
@@ -241,12 +242,16 @@ $site_id = $_SESSION['site_id'] ?? 'default';
             
             <div class="form-group" id="fileInputGroup" style="display: none;">
                 <label for="bundleFile">
-                    <?php echo xlt('選擇 .json 檔案'); ?>
+                    <?php echo xlt('選擇 .json 檔案（可多選）'); ?>
                 </label>
-                <input type="file" id="bundleFile" name="file" accept=".json,application/json" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%;">
+                <input type="file" id="bundleFile" name="file" accept=".json,application/json" multiple style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%;">
                 <small style="color: #666; display: block; margin-top: 5px;">
-                    <?php echo xlt('僅支援 .json 格式檔案'); ?>
+                    <?php echo xlt('僅支援 .json 格式檔案，可一次選擇多個檔案，系統會逐一處理'); ?>
                 </small>
+                <div id="fileList" style="margin-top: 10px; display: none;">
+                    <strong><?php echo xlt('已選擇的檔案'); ?>：</strong>
+                    <ul id="fileListItems" style="margin: 5px 0; padding-left: 20px;"></ul>
+                </div>
             </div>
             
             <div class="button-group">
@@ -259,6 +264,7 @@ $site_id = $_SESSION['site_id'] ?? 'default';
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <p style="margin-top: 10px;"><?php echo xlt('處理中...'); ?></p>
+            <div id="progressInfo" style="margin-top: 10px; font-size: 14px; color: #666;"></div>
         </div>
         
         <div id="resultContainer" style="display: none;">
@@ -269,6 +275,11 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                 </div>
                 <div class="result-content" id="resultContent"></div>
             </div>
+        </div>
+        
+        <div id="multiFileResults" style="display: none; margin-top: 20px;">
+            <h3><?php echo xlt('批次處理結果'); ?></h3>
+            <div id="multiFileResultsContent"></div>
         </div>
     </div>
     
@@ -293,6 +304,25 @@ $site_id = $_SESSION['site_id'] ?? 'default';
             }
         }
         
+        // 顯示已選擇的檔案列表
+        document.getElementById('bundleFile').addEventListener('change', function(e) {
+            const fileList = document.getElementById('fileList');
+            const fileListItems = document.getElementById('fileListItems');
+            const files = e.target.files;
+            
+            if (files && files.length > 0) {
+                fileList.style.display = 'block';
+                fileListItems.innerHTML = '';
+                for (let i = 0; i < files.length; i++) {
+                    const li = document.createElement('li');
+                    li.textContent = files[i].name + ' (' + (files[i].size / 1024).toFixed(2) + ' KB)';
+                    fileListItems.appendChild(li);
+                }
+            } else {
+                fileList.style.display = 'none';
+            }
+        });
+        
         document.getElementById('bundleForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
@@ -306,24 +336,137 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                 let response;
                 
                 if (uploadType === 'file') {
-                    // Handle file upload
+                    // Handle file upload (support multiple files)
                     const fileInput = document.getElementById('bundleFile');
-                    if (!fileInput.files || !fileInput.files[0]) {
-                        alert(<?php echo xlj('請選擇一個 .json 檔案'); ?>);
+                    if (!fileInput.files || !fileInput.files.length) {
+                        alert(<?php echo xlj('請至少選擇一個 .json 檔案'); ?>);
                         document.getElementById('loading').style.display = 'none';
                         return;
                     }
                     
-                    const formData = new FormData();
-                    formData.append('file', fileInput.files[0]);
+                    const files = Array.from(fileInput.files);
+                    const results = [];
+                    let successCount = 0;
+                    let failCount = 0;
                     
-                    response = await fetch(`/apis/${siteId}/fhir/Bundle`, {
-                        method: 'POST',
-                        headers: {
-                            'APICSRFTOKEN': csrfToken
-                        },
-                        body: formData
-                    });
+                    // Hide single result container, show multi-file results
+                    document.getElementById('resultContainer').style.display = 'none';
+                    document.getElementById('multiFileResults').style.display = 'none';
+                    const multiFileResultsContent = document.getElementById('multiFileResultsContent');
+                    multiFileResultsContent.innerHTML = '';
+                    
+                    // Process each file sequentially
+                    for (let i = 0; i < files.length; i++) {
+                        const file = files[i];
+                        const progressInfo = document.getElementById('progressInfo');
+                        progressInfo.textContent = <?php echo xlj('處理中'); ?> + `: ${i + 1}/${files.length} - ${file.name}`;
+                        
+                        try {
+                            const formData = new FormData();
+                            formData.append('file', file);
+                            
+                            const fileResponse = await fetch(`/apis/${siteId}/fhir/Bundle`, {
+                                method: 'POST',
+                                headers: {
+                                    'APICSRFTOKEN': csrfToken
+                                },
+                                body: formData
+                            });
+                            
+                            let parsedData;
+                            const contentType = fileResponse.headers.get('content-type');
+                            if (contentType && contentType.includes('application/json')) {
+                                parsedData = await fileResponse.json();
+                            } else {
+                                const text = await fileResponse.text();
+                                parsedData = {
+                                    raw: text,
+                                    parseError: text ? 'Response is not valid JSON' : 'Empty response'
+                                };
+                            }
+                            
+                            const isSuccess = fileResponse.ok;
+                            if (isSuccess) {
+                                successCount++;
+                            } else {
+                                failCount++;
+                            }
+                            
+                            results.push({
+                                fileName: file.name,
+                                fileSize: (file.size / 1024).toFixed(2) + ' KB',
+                                status: fileResponse.status,
+                                statusText: fileResponse.statusText,
+                                success: isSuccess,
+                                data: parsedData
+                            });
+                            
+                            // Add result to display
+                            const resultDiv = document.createElement('div');
+                            resultDiv.style.cssText = 'margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;';
+                            resultDiv.innerHTML = `
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                    <strong style="font-size: 16px;">${file.name}</strong>
+                                    <span class="status-badge ${isSuccess ? 'status-success' : 'status-error'}" style="padding: 4px 12px; border-radius: 4px; font-size: 12px;">
+                                        ${isSuccess ? <?php echo xlj('成功'); ?> : <?php echo xlj('失敗'); ?>} (${fileResponse.status})
+                                    </span>
+                                </div>
+                                <div style="background: #fff; padding: 10px; border-radius: 4px; max-height: 300px; overflow-y: auto;">
+                                    <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 12px;">${JSON.stringify(parsedData, null, 2)}</pre>
+                                </div>
+                            `;
+                            multiFileResultsContent.appendChild(resultDiv);
+                            
+                            // Small delay to prevent overwhelming the server
+                            if (i < files.length - 1) {
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                            }
+                            
+                        } catch (error) {
+                            failCount++;
+                            results.push({
+                                fileName: file.name,
+                                fileSize: (file.size / 1024).toFixed(2) + ' KB',
+                                status: 'Error',
+                                statusText: error.message,
+                                success: false,
+                                data: { error: error.message }
+                            });
+                            
+                            const resultDiv = document.createElement('div');
+                            resultDiv.style.cssText = 'margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;';
+                            resultDiv.innerHTML = `
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                    <strong style="font-size: 16px;">${file.name}</strong>
+                                    <span class="status-badge status-error" style="padding: 4px 12px; border-radius: 4px; font-size: 12px;">
+                                        <?php echo xlt('錯誤'); ?>
+                                    </span>
+                                </div>
+                                <div style="background: #fff; padding: 10px; border-radius: 4px;">
+                                    <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #d32f2f;">${JSON.stringify({ error: error.message, stack: error.stack }, null, 2)}</pre>
+                                </div>
+                            `;
+                            multiFileResultsContent.appendChild(resultDiv);
+                        }
+                    }
+                    
+                    // Show summary
+                    const summaryDiv = document.createElement('div');
+                    summaryDiv.style.cssText = 'margin-bottom: 20px; padding: 15px; border: 2px solid #4caf50; border-radius: 4px; background: #e8f5e9;';
+                    summaryDiv.innerHTML = `
+                        <h4 style="margin: 0 0 10px 0;"><?php echo xlt('處理完成'); ?></h4>
+                        <p style="margin: 5px 0;">
+                            <strong><?php echo xlt('總檔案數'); ?>：</strong> ${files.length}<br>
+                            <strong style="color: #4caf50;"><?php echo xlt('成功'); ?>：</strong> ${successCount}<br>
+                            <strong style="color: #f44336;"><?php echo xlt('失敗'); ?>：</strong> ${failCount}
+                        </p>
+                    `;
+                    multiFileResultsContent.insertBefore(summaryDiv, multiFileResultsContent.firstChild);
+                    
+                    document.getElementById('multiFileResults').style.display = 'block';
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('progressInfo').textContent = '';
+                    return;
                 } else {
                     // Handle direct JSON POST
                     const bundleJson = document.getElementById('bundleJson').value.trim();
@@ -621,6 +764,100 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                                 "display": "Vital Signs"
                                             }
                                         ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'multiple_patients') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Wang",
+                                        "given": ["Xiao", "Ming"]
+                                    }
+                                ],
+                                "gender": "male",
+                                "birthDate": "1990-01-01",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0912345678"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["123 Main Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "100",
+                                        "country": "TW"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:patient-002",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lee",
+                                        "given": ["Mei", "Ling"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1985-05-20",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0923456789"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["456 Second Street"],
+                                        "city": "Kaohsiung",
+                                        "postalCode": "800",
+                                        "country": "TW"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:patient-003",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Chen",
+                                        "given": ["Wei", "Ming"]
+                                    }
+                                ],
+                                "gender": "male",
+                                "birthDate": "1992-03-15",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0934567890"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Third Street"],
+                                        "city": "Taichung",
+                                        "postalCode": "400",
+                                        "country": "TW"
                                     }
                                 ]
                             }
