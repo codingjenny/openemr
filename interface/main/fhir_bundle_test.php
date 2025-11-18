@@ -207,7 +207,7 @@ $site_id = $_SESSION['site_id'] ?? 'default';
             <strong><?php echo xlt('API 端點'); ?>：</strong> /apis/<?php echo htmlspecialchars($site_id); ?>/fhir/Bundle<br>
             <strong><?php echo xlt('方法'); ?>：</strong> POST<br>
             <strong><?php echo xlt('支援方式'); ?>：</strong> 直接 POST JSON 或上傳 .json 檔案<br>
-            <strong><?php echo xlt('提示'); ?>：</strong> 使用 Patient + Observation 範例時，系統會自動處理 Bundle 內的資源引用。
+            <strong><?php echo xlt('提示'); ?>：</strong> 使用範例時，系統會自動處理 Bundle 內的資源引用（如 Patient、Encounter、Observation 之間的引用）。
         </div>
         
         <form id="bundleForm" enctype="multipart/form-data">
@@ -232,7 +232,8 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                     <?php echo xlt('Bundle JSON'); ?> 
                     <span style="margin-left: 10px;">
                         <a href="#" class="example-link" onclick="loadExample('patient'); return false;"><?php echo xlt('範例：Patient'); ?></a> | 
-                        <a href="#" class="example-link" onclick="loadExample('patient_observation'); return false;"><?php echo xlt('範例：Patient + Observation'); ?></a>
+                        <a href="#" class="example-link" onclick="loadExample('patient_observation'); return false;"><?php echo xlt('範例：Patient + Observation'); ?></a> |
+                        <a href="#" class="example-link" onclick="loadExample('patient_encounter_observation'); return false;"><?php echo xlt('範例：Patient + Encounter + Observation'); ?></a>
                     </span>
                 </label>
                 <textarea id="bundleJson" name="bundleJson" placeholder='<?php echo xlt('請輸入 FHIR Bundle JSON'); ?>'></textarea>
@@ -512,6 +513,97 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                 "subject": {
                                     "reference": "urn:uuid:patient-001",
                                     "display": "Patient"
+                                },
+                                "effectiveDateTime": "2024-01-15T10:30:00Z",
+                                "valueQuantity": {
+                                    "value": 120,
+                                    "unit": "mmHg",
+                                    "system": "http://unitsofmeasure.org",
+                                    "code": "mm[Hg]"
+                                },
+                                "category": [
+                                    {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                                                "code": "vital-signs",
+                                                "display": "Vital Signs"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_encounter_observation') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Chen",
+                                        "given": ["Wei", "Ming"]
+                                    }
+                                ],
+                                "gender": "male",
+                                "birthDate": "1992-03-15",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0934567890"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:encounter-001",
+                            "resource": {
+                                "resourceType": "Encounter",
+                                "status": "finished",
+                                "class": {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                                    "code": "AMB",
+                                    "display": "ambulatory"
+                                },
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "period": {
+                                    "start": "2024-01-15T10:00:00Z"
+                                },
+                                "reasonCode": [
+                                    {
+                                        "text": "Routine checkup"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "Observation",
+                                "status": "final",
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://loinc.org",
+                                            "code": "8480-6",
+                                            "display": "Systolic blood pressure"
+                                        }
+                                    ],
+                                    "text": "Systolic blood pressure"
+                                },
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "encounter": {
+                                    "reference": "urn:uuid:encounter-001"
                                 },
                                 "effectiveDateTime": "2024-01-15T10:30:00Z",
                                 "valueQuantity": {
