@@ -13678,6 +13678,14 @@ RestConfig::$FHIR_ROUTE_MAP = array(
         RestConfig::authorization_check("patients", "demo");
         $bundleController = new FhirBundleRestController();
         
+        // Check if queue mode is requested (via query parameter or header)
+        $useQueue = false;
+        if (isset($_GET['queue']) && $_GET['queue'] === 'true') {
+            $useQueue = true;
+        } elseif (isset($_SERVER['HTTP_X_USE_QUEUE']) && $_SERVER['HTTP_X_USE_QUEUE'] === 'true') {
+            $useQueue = true;
+        }
+        
         // Check if file was uploaded
         if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
             // Handle file upload
@@ -13687,10 +13695,47 @@ RestConfig::$FHIR_ROUTE_MAP = array(
         } else {
             // Handle direct JSON POST
             $data = (array) (json_decode(file_get_contents("php://input"), true));
-            $return = $bundleController->post($data);
+            $return = $bundleController->post($data, $useQueue);
             RestConfig::apiLog($return, $data);
             return $return;
         }
+    },
+
+    /**
+     *  @OA\Get(
+     *      path="/fhir/Bundle/queue/{queueId}",
+     *      description="Get the status of a queued FHIR Bundle request",
+     *      tags={"fhir"},
+     *      @OA\Parameter(
+     *          name="queueId",
+     *          in="path",
+     *          description="The queue ID returned from POST /fhir/Bundle?queue=true",
+     *          required=true,
+     *          @OA\Schema(
+     *              type="integer"
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="200",
+     *          description="Queue status retrieved successfully"
+     *      ),
+     *      @OA\Response(
+     *          response="404",
+     *          ref="#/components/responses/notfound"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "GET /fhir/Bundle/queue/:queueId" => function ($queueId) {
+        RestConfig::authorization_check("patients", "demo");
+        $bundleController = new FhirBundleRestController();
+        $return = $bundleController->getQueueStatus((int)$queueId);
+        RestConfig::apiLog($return, ['queue_id' => $queueId]);
+        return $return;
     },
 
     /**

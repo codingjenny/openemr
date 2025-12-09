@@ -112,9 +112,10 @@ class FhirBundleRestController
      * Processes a FHIR Bundle resource
      * Supports transaction and batch bundle types
      * @param $fhirJson The FHIR bundle resource (array)
-     * @returns 200 if the bundle is processed successfully, 400 if invalid
+     * @param bool $useQueue If true, queue the request for background processing (returns 202 Accepted)
+     * @returns 200 if the bundle is processed successfully, 202 if queued, 400 if invalid
      */
-    public function post($fhirJson)
+    public function post($fhirJson, $useQueue = false)
     {
         try {
             // Validate the bundle structure
@@ -133,6 +134,11 @@ class FhirBundleRestController
                     null,
                     400
                 );
+            }
+
+            // If queue mode is requested, add to queue and return 202 Accepted
+            if ($useQueue) {
+                return $this->queueBundle($fhirJson);
             }
 
             // Get bundle type directly from JSON
@@ -201,22 +207,10 @@ class FhirBundleRestController
                     // Process the entry
                     $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType);
                     
-                    $this->logger->debug("FhirBundleRestController: Processed entry with fullUrl", [
-                        'fullUrl' => $fullUrl,
-                        'entryResponse' => json_encode($entryResponse),
-                        'responseStatus' => $entryResponse['response']['status'] ?? 'unknown'
-                    ]);
-                    
                     if ($entryResponse) {
                         // Extract the created resource UUID from the response
                         $createdResource = $entryResponse['resource'] ?? null;
                         $resourceId = null;
-                        
-                        $this->logger->debug("FhirBundleRestController: Extracting UUID from resource", [
-                            'fullUrl' => $fullUrl,
-                            'createdResourceType' => is_object($createdResource) ? get_class($createdResource) : (is_array($createdResource) ? 'array' : 'null'),
-                            'createdResource' => is_array($createdResource) ? json_encode($createdResource) : 'not array'
-                        ]);
                         
                         // Handle both object and array formats
                         if (is_object($createdResource) && method_exists($createdResource, 'getId')) {
@@ -230,14 +224,11 @@ class FhirBundleRestController
                         
                         if ($resourceId) {
                             $uuidMap[$fullUrl] = $resourceId;
-                            $this->logger->debug("FhirBundleRestController: Mapped fullUrl to UUID", [
-                                'fullUrl' => $fullUrl,
-                                'uuid' => $resourceId
-                            ]);
                         } else {
+                            // Only log warning if we actually expected a UUID (not for all resource types)
                             $this->logger->warning("FhirBundleRestController: Could not extract UUID from resource", [
                                 'fullUrl' => $fullUrl,
-                                'createdResource' => is_array($createdResource) ? json_encode($createdResource) : 'not array'
+                                'resourceType' => is_array($createdResource) ? ($createdResource['resourceType'] ?? 'unknown') : 'unknown'
                             ]);
                         }
                         
@@ -273,51 +264,53 @@ class FhirBundleRestController
         }
         
         // Second pass: Process remaining entries with UUID references replaced
-        foreach ($entriesToProcess as $index => $entry) {
-            try {
-                // Log UUID map before replacement
-                $this->logger->debug("FhirBundleRestController: Processing entry in second pass", [
-                    'index' => $index,
-                    'uuidMap' => $uuidMap,
-                    'entryResourceType' => $entry['resource']['resourceType'] ?? 'unknown'
-                ]);
+        // Optimized: Group entries by resource type to reuse controllers
+        $groupedEntries = $this->groupEntriesByResourceType($entriesToProcess);
+        
+        // Process each group (entries of the same type can reuse the same controller)
+        foreach ($groupedEntries as $groupKey => $group) {
+            $resourceType = $group['resourceType'];
+            $method = $group['method'];
+            
+            // Create controller once per resource type group (reuse for all entries in group)
+            $controller = $this->getControllerForResourceType($resourceType);
+            
+            foreach ($group['entries'] as $entryData) {
+                $index = $entryData['index'];
+                $entry = $entryData['entry'];
                 
-                // Replace urn:uuid references in the resource before processing
-                $entry = $this->replaceUuidReferences($entry, $uuidMap);
-                
-                // Log after replacement
-                $this->logger->debug("FhirBundleRestController: After UUID replacement", [
-                    'index' => $index,
-                    'entryResource' => json_encode($entry['resource'] ?? [])
-                ]);
-                
-                // Process the entry (pass bundle type for auto-inference)
-                $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType);
-                
-                if ($entryResponse) {
-                    $responseEntries[$index] = $entryResponse;
-                }
-            } catch (\Exception $e) {
-                $this->logger->error("Failed to process bundle entry", [
-                    'index' => $index,
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString()
-                ]);
-                $responseEntries[$index] = [
-                    'response' => [
-                        'status' => '500',
-                        'outcome' => [
-                            'resourceType' => 'OperationOutcome',
-                            'issue' => [
-                                [
-                                    'severity' => 'error',
-                                    'code' => 'exception',
-                                    'diagnostics' => $e->getMessage()
+                try {
+                    // Replace urn:uuid references in the resource before processing
+                    $entry = $this->replaceUuidReferences($entry, $uuidMap);
+                    
+                    // Process the entry (pass bundle type for auto-inference)
+                    $entryResponse = $this->processBundleEntryFromJson($entry, $bundleType, $controller);
+                    
+                    if ($entryResponse) {
+                        $responseEntries[$index] = $entryResponse;
+                    }
+                } catch (\Exception $e) {
+                    $this->logger->error("Failed to process bundle entry", [
+                        'index' => $index,
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                    $responseEntries[$index] = [
+                        'response' => [
+                            'status' => '500',
+                            'outcome' => [
+                                'resourceType' => 'OperationOutcome',
+                                'issue' => [
+                                    [
+                                        'severity' => 'error',
+                                        'code' => 'exception',
+                                        'diagnostics' => $e->getMessage()
+                                    ]
                                 ]
                             ]
                         ]
-                    ]
-                ];
+                    ];
+                }
             }
         }
         
@@ -363,12 +356,6 @@ class FhirBundleRestController
         }
         
         // Log before replacement
-        $this->logger->debug("FhirBundleRestController: replaceUuidReferences called", [
-            'uuidMapSize' => count($uuidMap),
-            'uuidMap' => $uuidMap,
-            'resourceType' => $resource['resourceType'] ?? 'unknown'
-        ]);
-        
         // Recursively replace references in the resource (even if uuidMap is empty, we still need to process)
         $entry['resource'] = $this->replaceReferencesInResource($resource, $uuidMap);
         
@@ -390,13 +377,6 @@ class FhirBundleRestController
                 // Check if this is a reference field
                 if ($key === 'reference' && is_string($value) && strpos($value, 'urn:uuid:') === 0) {
                     // Replace urn:uuid reference with actual UUID if available
-                    $this->logger->debug("FhirBundleRestController: Found urn:uuid reference", [
-                        'value' => $value,
-                        'parentKey' => $parentKey,
-                        'uuidMap' => $uuidMap,
-                        'inMap' => isset($uuidMap[$value])
-                    ]);
-                    
                     if (isset($uuidMap[$value])) {
                         // Determine resource type from parent key (subject -> Patient, encounter -> Encounter, etc.)
                         $resourceType = $this->inferResourceTypeFromContext($parentKey);
@@ -406,17 +386,11 @@ class FhirBundleRestController
                             // Fallback: just use the UUID (service will need to handle it)
                             $result[$key] = $uuidMap[$value];
                         }
-                        $this->logger->debug("FhirBundleRestController: Replaced urn:uuid reference", [
-                            'original' => $value,
-                            'replaced' => $result[$key],
-                            'parentKey' => $parentKey,
-                            'resourceType' => $resourceType
-                        ]);
                     } else {
+                        // Only log warning if this is a critical reference (not all missing references are errors)
                         $this->logger->warning("FhirBundleRestController: urn:uuid reference not found in map", [
                             'value' => $value,
-                            'parentKey' => $parentKey,
-                            'uuidMapKeys' => array_keys($uuidMap)
+                            'parentKey' => $parentKey
                         ]);
                         $result[$key] = $value;
                     }
@@ -531,9 +505,10 @@ class FhirBundleRestController
      * Process a single bundle entry from JSON array
      * @param array $entry
      * @param string $bundleType The bundle type (transaction, batch, etc.)
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
      * @return array|null Response entry
      */
-    private function processBundleEntryFromJson($entry, $bundleType = null)
+    private function processBundleEntryFromJson($entry, $bundleType = null, $reusedController = null)
     {
         $request = $entry['request'] ?? null;
         $resource = $entry['resource'] ?? null;
@@ -551,19 +526,6 @@ class FhirBundleRestController
         // If no request, try to auto-infer for transaction/batch bundles
         if (!$request && ($bundleType === 'transaction' || $bundleType === 'batch')) {
             $request = $this->inferRequestFromResource($resource);
-            if ($request) {
-                $resourceType = null;
-                if (is_array($resource)) {
-                    $resourceType = $resource['resourceType'] ?? null;
-                } elseif (is_object($resource) && method_exists($resource, 'getResourceType')) {
-                    $resourceType = $resource->getResourceType();
-                }
-                $this->logger->debug("FhirBundleRestController: Auto-inferred request", [
-                    'method' => $request['method'],
-                    'url' => $request['url'],
-                    'resourceType' => $resourceType
-                ]);
-            }
         }
 
         if (!$request) {
@@ -596,17 +558,7 @@ class FhirBundleRestController
 
         // Route to appropriate controller based on URL
         try {
-            $result = $this->routeToController($methodValue, $urlValue, $resource);
-            
-            // Log the result for debugging
-            $this->logger->debug("FhirBundleRestController::processBundleEntryFromJson() routeToController result", [
-                'method' => $methodValue,
-                'url' => $urlValue,
-                'resultKeys' => is_array($result) ? array_keys($result) : 'not array',
-                'hasResource' => isset($result['resource']),
-                'resourceType' => is_array($result['resource'] ?? null) ? (gettype($result['resource'])) : 'not array',
-                'resourceIsEmpty' => empty($result['resource'] ?? null)
-            ]);
+            $result = $this->routeToController($methodValue, $urlValue, $resource, $reusedController);
             
             return [
                 'response' => [
@@ -645,9 +597,10 @@ class FhirBundleRestController
      * @param string $method HTTP method (POST, PUT, etc.)
      * @param string $url Resource URL
      * @param mixed $resource Resource data
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
      * @return array Result with status, location, and outcome
      */
-    private function routeToController($method, $url, $resource)
+    private function routeToController($method, $url, $resource, $reusedController = null)
     {
         // Parse URL to determine resource type
         // Support multiple URL formats:
@@ -691,15 +644,15 @@ class FhirBundleRestController
         // Route to appropriate controller based on resource type
         switch (strtolower($resourceType)) {
             case 'patient':
-                return $this->processPatientResource($method, $resourceId, $resourceArray);
+                return $this->processPatientResource($method, $resourceId, $resourceArray, $reusedController);
             case 'observation':
-                return $this->processObservationResource($method, $resourceId, $resourceArray);
+                return $this->processObservationResource($method, $resourceId, $resourceArray, $reusedController);
             case 'organization':
-                return $this->processOrganizationResource($method, $resourceId, $resourceArray);
+                return $this->processOrganizationResource($method, $resourceId, $resourceArray, $reusedController);
             case 'practitioner':
-                return $this->processPractitionerResource($method, $resourceId, $resourceArray);
+                return $this->processPractitionerResource($method, $resourceId, $resourceArray, $reusedController);
             case 'encounter':
-                return $this->processEncounterResource($method, $resourceId, $resourceArray);
+                return $this->processEncounterResource($method, $resourceId, $resourceArray, $reusedController);
             default:
                 // For unsupported resource types, return a not-supported response
                 return [
@@ -720,10 +673,11 @@ class FhirBundleRestController
 
     /**
      * Process Patient resource
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
      */
-    private function processPatientResource($method, $resourceId, $resourceArray)
+    private function processPatientResource($method, $resourceId, $resourceArray, $reusedController = null)
     {
-        $controller = new FhirPatientRestController();
+        $controller = $reusedController ?? new FhirPatientRestController();
         
         try {
             if ($method === 'POST') {
@@ -828,10 +782,11 @@ class FhirBundleRestController
 
     /**
      * Process Observation resource
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
      */
-    private function processObservationResource($method, $resourceId, $resourceArray)
+    private function processObservationResource($method, $resourceId, $resourceArray, $reusedController = null)
     {
-        $controller = new FhirObservationRestController();
+        $controller = $reusedController ?? new FhirObservationRestController();
         
         try {
             if ($method === 'POST') {
@@ -849,14 +804,6 @@ class FhirBundleRestController
                 } else {
                     $body = null;
                 }
-                
-                $this->logger->debug("FhirBundleRestController::processObservationResource() POST result", [
-                    'statusCode' => $statusCode,
-                    'resultType' => gettype($result),
-                    'bodyType' => gettype($body),
-                    'bodyKeys' => is_array($body) ? array_keys($body) : null,
-                    'isEmpty' => empty($body)
-                ]);
                 
                 if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
                     $statusCode = 400;
@@ -945,9 +892,9 @@ class FhirBundleRestController
     /**
      * Process Organization resource
      */
-    private function processOrganizationResource($method, $resourceId, $resourceArray)
+    private function processOrganizationResource($method, $resourceId, $resourceArray, $reusedController = null)
     {
-        $controller = new FhirOrganizationRestController();
+        $controller = $reusedController ?? new FhirOrganizationRestController();
         
         try {
             if ($method === 'POST') {
@@ -1029,9 +976,9 @@ class FhirBundleRestController
     /**
      * Process Practitioner resource
      */
-    private function processPractitionerResource($method, $resourceId, $resourceArray)
+    private function processPractitionerResource($method, $resourceId, $resourceArray, $reusedController = null)
     {
-        $controller = new FhirPractitionerRestController();
+        $controller = $reusedController ?? new FhirPractitionerRestController();
         
         try {
             if ($method === 'POST') {
@@ -1113,9 +1060,9 @@ class FhirBundleRestController
     /**
      * Process Encounter resource
      */
-    private function processEncounterResource($method, $resourceId, $resourceArray)
+    private function processEncounterResource($method, $resourceId, $resourceArray, $reusedController = null)
     {
-        $controller = new FhirEncounterRestController();
+        $controller = $reusedController ?? new FhirEncounterRestController();
         
         try {
             if ($method === 'POST') {
@@ -1216,6 +1163,266 @@ class FhirBundleRestController
                     ]
                 ]
             ];
+        }
+    }
+
+    /**
+     * Queue a FHIR Bundle for background processing
+     * @param array $fhirJson The FHIR bundle resource (array)
+     * @return array Response with 202 Accepted status and queue ID
+     */
+    private function queueBundle($fhirJson)
+    {
+        try {
+            // Insert into queue
+            $bundleJsonString = json_encode($fhirJson);
+            if ($bundleJsonString === false) {
+                $this->logger->error("Failed to encode bundle JSON", [
+                    'json_error' => json_last_error_msg()
+                ]);
+                return RestControllerHelper::responseHandler(
+                    ['error' => 'Failed to encode bundle JSON'],
+                    null,
+                    500
+                );
+            }
+
+            $sql = "INSERT INTO `fhir_bundle_queue` 
+                    (`bundle_json`, `status`, `datetime_queued`, `max_retries`) 
+                    VALUES (?, 'pending', NOW(), 3)";
+            
+            $this->logger->debug("Attempting to insert bundle into queue", [
+                'bundle_size' => strlen($bundleJsonString),
+                'sql' => $sql
+            ]);
+            
+            // Use sqlInsert() instead of sqlStatement() to get the last insert id
+            // sqlInsert() may throw SqlQueryException, so we catch it
+            try {
+                $queueId = sqlInsert($sql, [$bundleJsonString]);
+            } catch (\Exception $insertException) {
+                $this->logger->error("sqlInsert() threw exception", [
+                    'error' => $insertException->getMessage(),
+                    'trace' => $insertException->getTraceAsString(),
+                    'sql_error' => sqlGetLastError()
+                ]);
+                return RestControllerHelper::responseHandler(
+                    [
+                        'error' => 'Failed to queue bundle',
+                        'message' => $insertException->getMessage()
+                    ],
+                    null,
+                    500
+                );
+            }
+            
+            if ($queueId === false || $queueId === 0 || empty($queueId)) {
+                $this->logger->error("Failed to insert bundle into queue - invalid queue ID", [
+                    'queue_id' => $queueId,
+                    'sql_error' => sqlGetLastError(),
+                    'bundle_size' => strlen($bundleJsonString)
+                ]);
+                return RestControllerHelper::responseHandler(
+                    [
+                        'error' => 'Failed to queue bundle',
+                        'message' => 'Insert returned invalid queue ID'
+                    ],
+                    null,
+                    500
+                );
+            }
+            
+            $this->logger->info("FHIR Bundle queued for background processing", [
+                'queue_id' => $queueId,
+                'bundle_size' => strlen($bundleJsonString)
+            ]);
+
+            // Return 202 Accepted with queue ID
+            return RestControllerHelper::responseHandler(
+                [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'information',
+                            'code' => 'informational',
+                            'details' => [
+                                'text' => 'Bundle queued for processing'
+                            ]
+                        ]
+                    ],
+                    'queue_id' => $queueId,
+                    'status_url' => '/fhir/Bundle/queue/' . $queueId
+                ],
+                null,
+                202
+            );
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to queue bundle", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Failed to queue bundle',
+                    'message' => $e->getMessage()
+                ],
+                null,
+                500
+            );
+        }
+    }
+
+    /**
+     * Get the status of a queued bundle
+     * @param int $queueId The queue ID
+     * @return array Response with queue status
+     */
+    public function getQueueStatus($queueId)
+    {
+        try {
+            $sql = "SELECT `id`, `status`, `datetime_queued`, `datetime_processed`, 
+                           `error`, `error_message`, `retry_count`, `result_json`
+                    FROM `fhir_bundle_queue` 
+                    WHERE `id` = ?";
+            
+            $result = sqlQuery($sql, [$queueId]);
+            
+            if (!$result) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-found',
+                                'details' => [
+                                    'text' => 'Queue entry not found'
+                                ]
+                            ]
+                        ]
+                    ],
+                    null,
+                    404
+                );
+            }
+
+            $response = [
+                'resourceType' => 'Bundle',
+                'type' => 'searchset',
+                'total' => 1,
+                'entry' => [
+                    [
+                        'resource' => [
+                            'resourceType' => 'BundleQueueStatus',
+                            'id' => (string)$result['id'],
+                            'status' => $result['status'],
+                            'datetimeQueued' => $result['datetime_queued'],
+                            'datetimeProcessed' => $result['datetime_processed'],
+                            'retryCount' => (int)$result['retry_count']
+                        ]
+                    ]
+                ]
+            ];
+
+            if ($result['error']) {
+                $response['entry'][0]['resource']['error'] = true;
+                $response['entry'][0]['resource']['errorMessage'] = $result['error_message'];
+            }
+
+            if ($result['status'] === 'completed' && !empty($result['result_json'])) {
+                $resultBundle = json_decode($result['result_json'], true);
+                if ($resultBundle) {
+                    $response['entry'][0]['resource']['resultBundle'] = $resultBundle;
+                }
+            }
+
+            return RestControllerHelper::responseHandler($response, null, 200);
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to get queue status", [
+                'queue_id' => $queueId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Failed to get queue status',
+                    'message' => $e->getMessage()
+                ],
+                null,
+                500
+            );
+        }
+    }
+
+    /**
+     * Group entries by resource type and method for batch processing
+     * This allows us to reuse controllers for entries of the same type
+     * @param array $entriesToProcess Entries to group
+     * @return array Grouped entries
+     */
+    private function groupEntriesByResourceType($entriesToProcess)
+    {
+        $grouped = [];
+        
+        foreach ($entriesToProcess as $index => $entry) {
+            // Extract resource type and method from entry
+            $resource = $entry['resource'] ?? null;
+            $request = $entry['request'] ?? null;
+            
+            $resourceType = null;
+            if (is_array($resource)) {
+                $resourceType = $resource['resourceType'] ?? null;
+            } elseif (is_object($resource) && method_exists($resource, 'getResourceType')) {
+                $resourceType = $resource->getResourceType();
+            }
+            
+            $method = $request['method'] ?? 'POST';
+            
+            // Create group key: resourceType_method
+            $groupKey = strtolower(($resourceType ?? 'unknown') . '_' . $method);
+            
+            if (!isset($grouped[$groupKey])) {
+                $grouped[$groupKey] = [
+                    'resourceType' => $resourceType,
+                    'method' => $method,
+                    'entries' => []
+                ];
+            }
+            
+            $grouped[$groupKey]['entries'][] = [
+                'index' => $index,
+                'entry' => $entry
+            ];
+        }
+        
+        return $grouped;
+    }
+
+    /**
+     * Get or create a controller for a specific resource type
+     * This allows controller reuse across multiple entries of the same type
+     * @param string $resourceType Resource type (Patient, Observation, etc.)
+     * @return object|null Controller instance or null if not supported
+     */
+    private function getControllerForResourceType($resourceType)
+    {
+        if (!$resourceType) {
+            return null;
+        }
+        
+        switch (strtolower($resourceType)) {
+            case 'patient':
+                return new FhirPatientRestController();
+            case 'observation':
+                return new FhirObservationRestController();
+            case 'organization':
+                return new FhirOrganizationRestController();
+            case 'practitioner':
+                return new FhirPractitionerRestController();
+            case 'encounter':
+                return new FhirEncounterRestController();
+            default:
+                return null;
         }
     }
 }
