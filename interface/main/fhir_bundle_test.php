@@ -229,14 +229,25 @@ $site_id = $_SESSION['site_id'] ?? 'default';
             
             <div class="form-group" id="jsonInputGroup">
                 <label for="bundleJson">
-                    <?php echo xlt('Bundle JSON'); ?> 
-                    <span style="margin-left: 10px;">
-                        <a href="#" class="example-link" onclick="loadExample('patient'); return false;"><?php echo xlt('範例：Patient'); ?></a> | 
-                        <a href="#" class="example-link" onclick="loadExample('patient_observation'); return false;"><?php echo xlt('範例：Patient + Observation'); ?></a> |
-                        <a href="#" class="example-link" onclick="loadExample('patient_encounter_observation'); return false;"><?php echo xlt('範例：Patient + Encounter + Observation'); ?></a> |
-                        <a href="#" class="example-link" onclick="loadExample('multiple_patients'); return false;"><?php echo xlt('範例：多個 Patient'); ?></a>
-                    </span>
+                    <?php echo xlt('Bundle JSON'); ?>
                 </label>
+                <div style="margin-bottom: 10px;">
+                    <label for="exampleSelect" style="display: inline-block; margin-right: 10px; font-weight: normal;">
+                        <?php echo xlt('範例'); ?>：
+                    </label>
+                    <select id="exampleSelect" onchange="loadExampleFromSelect()" style="padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; min-width: 300px;">
+                        <option value=""><?php echo xlt('-- 選擇範例 --'); ?></option>
+                        <option value="patient"><?php echo xlt('範例：Patient'); ?></option>
+                        <option value="patient_observation"><?php echo xlt('範例：Patient + Observation'); ?></option>
+                        <option value="patient_encounter_observation"><?php echo xlt('範例：Patient + Encounter + Observation'); ?></option>
+                        <option value="patient_allergyintolerance"><?php echo xlt('範例：Patient + AllergyIntolerance'); ?></option>
+                        <option value="patient_condition"><?php echo xlt('範例：Patient + Condition'); ?></option>
+                        <option value="patient_procedure"><?php echo xlt('範例：Patient + Procedure'); ?></option>
+                        <option value="patient_encounter_procedure"><?php echo xlt('範例：Patient + Encounter + Procedure'); ?></option>
+                        <option value="patient_careplan"><?php echo xlt('範例：Patient + CarePlan'); ?></option>
+                        <option value="multiple_patients"><?php echo xlt('範例：多個 Patient'); ?></option>
+                    </select>
+                </div>
                 <textarea id="bundleJson" name="bundleJson" placeholder='<?php echo xlt('請輸入 FHIR Bundle JSON'); ?>'></textarea>
             </div>
             
@@ -570,6 +581,16 @@ $site_id = $_SESSION['site_id'] ?? 'default';
             }
         }
         
+        function loadExampleFromSelect() {
+            const select = document.getElementById('exampleSelect');
+            const type = select.value;
+            if (type) {
+                loadExample(type);
+                // Reset select to default after loading
+                select.value = '';
+            }
+        }
+        
         function loadExample(type) {
             let example;
             
@@ -766,6 +787,432 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                         ]
                                     }
                                 ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_allergyintolerance') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lin",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-10",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0911122334"
+                                    },
+                                    {
+                                        "system": "email",
+                                        "value": "xiaohua@example.com"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105",
+                                        "country": "TW"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "AllergyIntolerance",
+                                "patient": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "clinicalStatus": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+                                            "code": "active",
+                                            "display": "Active"
+                                        }
+                                    ]
+                                },
+                                "verificationStatus": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification",
+                                            "code": "confirmed",
+                                            "display": "Confirmed"
+                                        }
+                                    ]
+                                },
+                                "category": [
+                                    "medication"
+                                ],
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://snomed.info/sct",
+                                            "code": "762952008",
+                                            "display": "Penicillin"
+                                        }
+                                    ],
+                                    "text": "Penicillin"
+                                },
+                                "criticality": "high",
+                                "reaction": [
+                                    {
+                                        "manifestation": [
+                                            {
+                                                "coding": [
+                                                    {
+                                                        "system": "http://snomed.info/sct",
+                                                        "code": "271807003",
+                                                        "display": "Rash"
+                                                    }
+                                                ],
+                                                "text": "Rash"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "onsetDateTime": "2024-01-15"
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_condition') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lin",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-10",
+                                "telecom": [
+                                    {
+                                        "system": "email",
+                                        "value": "xiaohua@example.com",
+                                        "use": "home"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "Condition",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "clinicalStatus": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                                            "code": "active",
+                                            "display": "Active"
+                                        }
+                                    ]
+                                },
+                                "verificationStatus": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+                                            "code": "confirmed",
+                                            "display": "Confirmed"
+                                        }
+                                    ]
+                                },
+                                "category": [
+                                    {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                                                "code": "problem-list-item",
+                                                "display": "Problem List Item"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://snomed.info/sct",
+                                            "code": "44054006",
+                                            "display": "Diabetes mellitus type 2"
+                                        }
+                                    ],
+                                    "text": "Diabetes mellitus type 2"
+                                },
+                                "onsetDateTime": "2024-01-15"
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_procedure') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lin",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-10",
+                                "telecom": [
+                                    {
+                                        "system": "email",
+                                        "value": "xiaohua@example.com",
+                                        "use": "home"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "Procedure",
+                                "status": "completed",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://snomed.info/sct",
+                                            "code": "387713003",
+                                            "display": "Surgical procedure"
+                                        }
+                                    ],
+                                    "text": "Surgical procedure"
+                                },
+                                "performedDateTime": "2024-01-15T10:30:00Z",
+                                "note": [
+                                    {
+                                        "text": "Routine surgical procedure performed successfully"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_encounter_procedure') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lin",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-10",
+                                "telecom": [
+                                    {
+                                        "system": "email",
+                                        "value": "xiaohua@example.com",
+                                        "use": "home"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:encounter-001",
+                            "resource": {
+                                "resourceType": "Encounter",
+                                "status": "finished",
+                                "class": {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                                    "code": "AMB",
+                                    "display": "ambulatory"
+                                },
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "period": {
+                                    "start": "2024-01-15T10:00:00Z"
+                                },
+                                "reasonCode": [
+                                    {
+                                        "text": "Surgical procedure"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "Procedure",
+                                "status": "completed",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "encounter": {
+                                    "reference": "urn:uuid:encounter-001"
+                                },
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://snomed.info/sct",
+                                            "code": "387713003",
+                                            "display": "Surgical procedure"
+                                        }
+                                    ],
+                                    "text": "Surgical procedure"
+                                },
+                                "performedDateTime": "2024-01-15T10:30:00Z",
+                                "note": [
+                                    {
+                                        "text": "Routine surgical procedure performed successfully"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_careplan') {
+                // Patient + CarePlan transaction bundle with explicit request for each entry
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lin",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-10",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0911122334"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105",
+                                        "country": "TW"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "CarePlan",
+                                "status": "active",
+                                "intent": "plan",
+                                "title": "Diabetes care plan",
+                                "description": "Nutrition, exercise, and glucose monitoring",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "period": {
+                                    "start": "2024-01-15",
+                                    "end": "2024-12-31"
+                                },
+                                "category": [
+                                    {
+                                        "coding": [
+                                            {
+                                                "system": "http://snomed.info/sct",
+                                                "code": "734163000",
+                                                "display": "Diabetes self management plan"
+                                            }
+                                        ],
+                                        "text": "Diabetes self management plan"
+                                    }
+                                ],
+                                "activity": [
+                                    {
+                                        "detail": {
+                                            "kind": "ServiceRequest",
+                                            "code": {
+                                                "coding": [
+                                                    {
+                                                        "system": "http://snomed.info/sct",
+                                                        "code": "710815001",
+                                                        "display": "Diabetic diet"
+                                                    }
+                                                ],
+                                                "text": "Dietary guidance"
+                                            },
+                                            "status": "scheduled",
+                                            "description": "Diet and exercise counseling"
+                                        }
+                                    }
+                                ],
+                                "note": [
+                                    {
+                                        "text": "Focus on lifestyle modification and follow-up every 3 months"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "CarePlan"
                             }
                         }
                     ]

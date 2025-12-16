@@ -13,6 +13,9 @@ use OpenEMR\Services\ConditionService;
 use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
 use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
 use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
+use OpenEMR\Services\FHIR\UtilsService;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Services\Search\FhirSearchParameterDefinition;
 use OpenEMR\Services\Search\ISearchField;
 use OpenEMR\Services\Search\SearchFieldType;
@@ -253,5 +256,320 @@ class FhirConditionService extends FhirServiceBase implements IResourceUSCIGProf
     public function getPatientContextSearchField(): FhirSearchParameterDefinition
     {
         return new FhirSearchParameterDefinition('patient', SearchFieldType::REFERENCE, [new ServiceField('puuid', ServiceField::TYPE_UUID)]);
+    }
+
+    /**
+     * Parses a FHIR Condition resource, returning the equivalent OpenEMR record.
+     *
+     * @param \OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource $fhirResource The source FHIR resource
+     * @return array a mapped OpenEMR data record (array)
+     */
+    public function parseFhirResource(\OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource $fhirResource)
+    {
+        // Ensure it's a Condition resource
+        if (!($fhirResource instanceof FHIRCondition)) {
+            throw new \InvalidArgumentException("Resource must be of type FHIRCondition");
+        }
+        
+        $data = [];
+
+        // Extract patient reference (subject)
+        $subjectRef = $fhirResource->getSubject();
+        if (!empty($subjectRef)) {
+            $subjectReference = UtilsService::parseReference($subjectRef);
+            if (!empty($subjectReference) && $subjectReference['type'] === 'Patient' && $subjectReference['localResource']) {
+                $data['puuid'] = $subjectReference['uuid'];
+            } elseif (is_array($subjectRef) && !empty($subjectRef['reference'])) {
+                // Handle array format (from JSON deserialization)
+                $referenceString = $subjectRef['reference'];
+                $parts = explode('/', $referenceString);
+                if (count($parts) >= 2 && $parts[0] === 'Patient') {
+                    $data['puuid'] = $parts[1];
+                }
+            }
+        }
+
+        // Extract code (diagnosis)
+        $code = $fhirResource->getCode();
+        if (!empty($code)) {
+            if (is_object($code) && method_exists($code, 'getCoding')) {
+                $codings = $code->getCoding();
+                if (!empty($codings) && is_array($codings)) {
+                    $primaryCoding = $codings[0];
+                    if (is_object($primaryCoding) && method_exists($primaryCoding, 'getCode')) {
+                        $codeObj = $primaryCoding->getCode();
+                        $codeValue = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)$codeObj;
+                        $systemObj = method_exists($primaryCoding, 'getSystem') ? $primaryCoding->getSystem() : null;
+                        $codeSystem = is_object($systemObj) && method_exists($systemObj, 'getValue') ? $systemObj->getValue() : (string)($systemObj ?? '');
+                        $displayObj = method_exists($primaryCoding, 'getDisplay') ? $primaryCoding->getDisplay() : null;
+                        $codeDisplay = is_object($displayObj) && method_exists($displayObj, 'getValue') ? $displayObj->getValue() : (string)($displayObj ?? '');
+                        
+                        $data['diagnosis'] = [
+                            $codeValue => [
+                                'code' => $codeValue,
+                                'system' => $codeSystem ?: 'http://snomed.info/sct',
+                                'description' => $codeDisplay ?: $codeValue
+                            ]
+                        ];
+                        $data['title'] = $codeDisplay ?: $codeValue;
+                    }
+                }
+            } elseif (is_array($code)) {
+                // Handle array format
+                if (!empty($code['coding']) && is_array($code['coding'])) {
+                    $primaryCoding = $code['coding'][0] ?? null;
+                    if (is_array($primaryCoding)) {
+                        $codeValue = $primaryCoding['code'] ?? null;
+                        $codeSystem = $primaryCoding['system'] ?? 'http://snomed.info/sct';
+                        $codeDisplay = $primaryCoding['display'] ?? $codeValue;
+                        
+                        if ($codeValue) {
+                            $data['diagnosis'] = [
+                                $codeValue => [
+                                    'code' => $codeValue,
+                                    'system' => $codeSystem,
+                                    'description' => $codeDisplay
+                                ]
+                            ];
+                            $data['title'] = $codeDisplay;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract clinical status
+        $clinicalStatus = $fhirResource->getClinicalStatus();
+        if (!empty($clinicalStatus)) {
+            if (is_object($clinicalStatus) && method_exists($clinicalStatus, 'getCoding')) {
+                $codings = $clinicalStatus->getCoding();
+                if (!empty($codings) && is_array($codings)) {
+                    $primaryCoding = $codings[0];
+                    if (is_object($primaryCoding) && method_exists($primaryCoding, 'getCode')) {
+                        $statusCodeObj = $primaryCoding->getCode();
+                        $statusCode = is_object($statusCodeObj) && method_exists($statusCodeObj, 'getValue') ? $statusCodeObj->getValue() : (string)$statusCodeObj;
+                        // Map FHIR clinical status to OpenEMR outcome
+                        // active -> outcome = 0, resolved -> outcome = 1, inactive -> outcome = 0
+                        if ($statusCode === 'resolved') {
+                            $data['outcome'] = '1';
+                        } else {
+                            $data['outcome'] = '0';
+                        }
+                    }
+                }
+            } elseif (is_array($clinicalStatus)) {
+                if (!empty($clinicalStatus['coding']) && is_array($clinicalStatus['coding'])) {
+                    $primaryCoding = $clinicalStatus['coding'][0] ?? null;
+                    if (is_array($primaryCoding)) {
+                        $statusCode = $primaryCoding['code'] ?? null;
+                        if ($statusCode === 'resolved') {
+                            $data['outcome'] = '1';
+                        } else {
+                            $data['outcome'] = '0';
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract verification status
+        $verificationStatus = $fhirResource->getVerificationStatus();
+        if (!empty($verificationStatus)) {
+            if (is_object($verificationStatus) && method_exists($verificationStatus, 'getCoding')) {
+                $codings = $verificationStatus->getCoding();
+                if (!empty($codings) && is_array($codings)) {
+                    $primaryCoding = $codings[0];
+                    if (is_object($primaryCoding) && method_exists($primaryCoding, 'getCode')) {
+                        $verificationCodeObj = $primaryCoding->getCode();
+                        $data['verification'] = is_object($verificationCodeObj) && method_exists($verificationCodeObj, 'getValue') ? $verificationCodeObj->getValue() : (string)$verificationCodeObj;
+                    }
+                }
+            } elseif (is_array($verificationStatus)) {
+                if (!empty($verificationStatus['coding']) && is_array($verificationStatus['coding'])) {
+                    $primaryCoding = $verificationStatus['coding'][0] ?? null;
+                    if (is_array($primaryCoding)) {
+                        $data['verification'] = $primaryCoding['code'] ?? null;
+                    }
+                }
+            }
+        }
+
+        // Extract onset date
+        $onsetDateTime = $fhirResource->getOnsetDateTime();
+        if (!empty($onsetDateTime)) {
+            $dateValue = null;
+            if (is_object($onsetDateTime) && method_exists($onsetDateTime, 'getValue')) {
+                $dateValue = $onsetDateTime->getValue();
+            } elseif (is_string($onsetDateTime)) {
+                $dateValue = $onsetDateTime;
+            }
+            
+            if (!empty($dateValue)) {
+                // Convert to date format (Y-m-d) for database validation
+                // ConditionValidator expects Y-m-d format (not Y-m-d H:i:s)
+                try {
+                    $dateObj = new \DateTime($dateValue);
+                    $data['begdate'] = $dateObj->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // If date parsing fails, try to extract just the date part
+                    if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                        $data['begdate'] = $matches[1];
+                    }
+                }
+            }
+        }
+
+        // Extract abatement date (end date)
+        $abatementDateTime = $fhirResource->getAbatementDateTime();
+        if (!empty($abatementDateTime)) {
+            $dateValue = null;
+            if (is_object($abatementDateTime) && method_exists($abatementDateTime, 'getValue')) {
+                $dateValue = $abatementDateTime->getValue();
+            } elseif (is_string($abatementDateTime)) {
+                $dateValue = $abatementDateTime;
+            }
+            
+            if (!empty($dateValue)) {
+                // Convert to date format (Y-m-d) for database validation
+                // ConditionValidator expects Y-m-d format (not Y-m-d H:i:s)
+                try {
+                    $dateObj = new \DateTime($dateValue);
+                    $data['enddate'] = $dateObj->format('Y-m-d');
+                } catch (\Exception $e) {
+                    if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                        $data['enddate'] = $matches[1];
+                    }
+                }
+            }
+        }
+
+        // Extract encounter reference
+        $encounterRef = $fhirResource->getEncounter();
+        if (!empty($encounterRef)) {
+            $encounterReference = UtilsService::parseReference($encounterRef);
+            if (!empty($encounterReference) && $encounterReference['type'] === 'Encounter' && $encounterReference['localResource']) {
+                $data['encounter_uuid'] = $encounterReference['uuid'];
+            } elseif (is_array($encounterRef) && !empty($encounterRef['reference'])) {
+                $referenceString = $encounterRef['reference'];
+                $parts = explode('/', $referenceString);
+                if (count($parts) >= 2 && $parts[0] === 'Encounter') {
+                    $data['encounter_uuid'] = $parts[1];
+                }
+            }
+        }
+
+        // Extract recorder (practitioner)
+        $recorder = $fhirResource->getRecorder();
+        if (!empty($recorder)) {
+            $recorderReference = UtilsService::parseReference($recorder);
+            if (!empty($recorderReference) && $recorderReference['type'] === 'Practitioner' && $recorderReference['localResource']) {
+                $practitionerUuid = $recorderReference['uuid'];
+                $practitionerData = QueryUtils::fetchRecords(
+                    "SELECT username FROM users WHERE uuid = ?",
+                    [UuidRegistry::uuidToBytes($practitionerUuid)]
+                );
+                if (!empty($practitionerData) && !empty($practitionerData[0])) {
+                    $data['user'] = $practitionerData[0]['username'];
+                }
+            }
+        }
+
+        // Set default values
+        if (empty($data['user'])) {
+            $data['user'] = (isset($_SESSION) && isset($_SESSION['authUser'])) ? $_SESSION['authUser'] : null;
+        }
+
+        // Set default occurrence
+        if (empty($data['occurrence'])) {
+            $data['occurrence'] = '0';
+        }
+
+        return $data;
+    }
+
+    /**
+     * Inserts an OpenEMR record into the system.
+     * @param array $openEmrRecord OpenEMR condition record
+     * @return ProcessingResult
+     */
+    protected function insertOpenEMRRecord($openEmrRecord)
+    {
+        $processingResult = new ProcessingResult();
+
+        try {
+            // Validate required fields
+            if (empty($openEmrRecord['puuid'])) {
+                $processingResult->setValidationMessages(['patient' => 'Patient reference is required']);
+                return $processingResult;
+            }
+
+            // Convert diagnosis array to string for database storage
+            // Database expects format: "CODE_TYPE:CODE" or "CODE_TYPE:CODE;CODE_TYPE:CODE" for multiple
+            if (!empty($openEmrRecord['diagnosis']) && is_array($openEmrRecord['diagnosis'])) {
+                $diagnosisStrings = [];
+                foreach ($openEmrRecord['diagnosis'] as $code => $codeValues) {
+                    $codeType = 'SNOMED-CT'; // Default
+                    $system = $codeValues['system'] ?? '';
+                    // Map FHIR system URI to OpenEMR code type
+                    if (strpos($system, 'snomed') !== false) {
+                        $codeType = 'SNOMED-CT';
+                    } elseif (strpos($system, 'icd-10') !== false || strpos($system, 'icd10') !== false) {
+                        $codeType = 'ICD10';
+                    } elseif (strpos($system, 'loinc') !== false) {
+                        $codeType = 'LOINC';
+                    }
+                    $diagnosisStrings[] = $codeType . ':' . $code;
+                }
+                $openEmrRecord['diagnosis'] = implode(';', $diagnosisStrings);
+            }
+
+            // Use ConditionService to insert
+            $insertResult = $this->conditionService->insert($openEmrRecord);
+
+            if ($insertResult->isValid() && !empty($insertResult->getData())) {
+                // Get the inserted record
+                $insertedData = $insertResult->getData()[0];
+                $uuid = $insertedData['uuid'] ?? null;
+
+                if (!empty($uuid)) {
+                    // Ensure UUID is in string format
+                    $uuidString = is_string($uuid) ? $uuid : UuidRegistry::uuidToString($uuid);
+                    
+                    // Fetch the complete record and convert to FHIR
+                    $conditionRecordResult = $this->conditionService->getOne($uuidString);
+                    
+                    if ($conditionRecordResult->hasData() && count($conditionRecordResult->getData()) > 0) {
+                        $conditionRecord = $conditionRecordResult->getData()[0];
+                        
+                        // Ensure it's an array (OpenEMR record format)
+                        if (!is_array($conditionRecord)) {
+                            $conditionRecord = json_decode(json_encode($conditionRecord), true);
+                        }
+                        
+                        // Convert complete OpenEMR condition record to FHIR resource
+                        $fhirResource = $this->parseOpenEMRRecord($conditionRecord, false);
+                        $processingResult->setData([]);
+                        $processingResult->addData($fhirResource);
+                    } else {
+                        $processingResult->addInternalError("Failed to retrieve inserted condition record");
+                    }
+                } else {
+                    $processingResult->addInternalError("No UUID returned from insert operation");
+                }
+            } else {
+                // Copy validation messages and errors from insert result
+                $validationMessages = $insertResult->getValidationMessages();
+                if (!empty($validationMessages)) {
+                    $processingResult->setValidationMessages($validationMessages);
+                }
+                foreach ($insertResult->getInternalErrors() as $error) {
+                    $processingResult->addInternalError($error);
+                }
+            }
+        } catch (\Exception $e) {
+            $processingResult->addInternalError("Error inserting condition record: " . $e->getMessage());
+        }
+
+        return $processingResult;
     }
 }
