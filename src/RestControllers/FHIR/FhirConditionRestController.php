@@ -16,16 +16,91 @@ use OpenEMR\Services\FHIR\FhirConditionService;
 use OpenEMR\Services\FHIR\FhirResourcesService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\Common\Http\HttpRestRequest;
+use OpenEMR\Services\FHIR\FhirValidationService;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRCondition;
 
 class FhirConditionRestController
 {
     private $fhirConditionService;
     private $fhirService;
+    private $fhirValidate;
 
-    public function __construct()
+    public function __construct(?HttpRestRequest $request = null)
     {
         $this->fhirConditionService = new FhirConditionService();
         $this->fhirService = new FhirResourcesService();
+        $this->fhirValidate = new FhirValidationService();
+    }
+
+    /**
+     * Creates a new FHIR condition resource
+     * @param $fhirJson The FHIR condition resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIRCondition object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty Condition resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            if (!($fhirResource instanceof FHIRCondition)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Resource must be of type Condition'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+
+            $processingResult = $this->fhirConditionService->insert($fhirResource);
+            $result = RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+            return $result;
+        } catch (\Throwable $e) {
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing Condition',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
     }
 
     /**

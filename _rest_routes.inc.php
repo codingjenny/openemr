@@ -13641,7 +13641,74 @@ RestConfig::$FHIR_ROUTE_MAP = array(
      *                      property="entry",
      *                      type="array",
      *                      description="Array of bundle entries"
-     *                  )
+     *                  ),
+     *                  example={
+     *                      "resourceType": "Bundle",
+     *                      "type": "transaction",
+     *                      "entry": {
+     *                          {
+     *                              "request": {
+     *                                  "method": "POST",
+     *                                  "url": "AllergyIntolerance"
+     *                              },
+     *                              "resource": {
+     *                                  "resourceType": "AllergyIntolerance",
+     *                                  "patient": {
+     *                                      "reference": "Patient/[PATIENT_UUID]"
+     *                                  },
+     *                                  "clinicalStatus": {
+     *                                      "coding": {
+     *                                          {
+     *                                              "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+     *                                              "code": "active",
+     *                                              "display": "Active"
+     *                                          }
+     *                                      }
+     *                                  },
+     *                                  "verificationStatus": {
+     *                                      "coding": {
+     *                                          {
+     *                                              "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification",
+     *                                              "code": "confirmed",
+     *                                              "display": "Confirmed"
+     *                                          }
+     *                                      }
+     *                                  },
+     *                                  "category": {
+     *                                      "medication"
+     *                                  },
+     *                                  "code": {
+     *                                      "coding": {
+     *                                          {
+     *                                              "system": "http://snomed.info/sct",
+     *                                              "code": "762952008",
+     *                                              "display": "Penicillin"
+     *                                          }
+     *                                      },
+     *                                      "text": "Penicillin"
+     *                                  },
+     *                                  "criticality": "high",
+     *                                  "reaction": {
+     *                                      {
+     *                                          "manifestation": {
+     *                                              {
+     *                                                  "coding": {
+     *                                                      {
+     *                                                          "system": "http://snomed.info/sct",
+     *                                                          "code": "271807003",
+     *                                                          "display": "Rash"
+     *                                                      }
+     *                                                  },
+     *                                                  "text": "Rash"
+     *                                              }
+     *                                          }
+     *                                      }
+     *                                  },
+     *                                  "onsetDateTime": "2024-01-15"
+     *                              }
+     *                          }
+     *                      }
+     *                  }
      *              )
      *          ),
      *          @OA\MediaType(

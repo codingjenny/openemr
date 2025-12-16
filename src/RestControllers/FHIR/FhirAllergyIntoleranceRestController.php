@@ -15,18 +15,93 @@ namespace OpenEMR\RestControllers\FHIR;
 use OpenEMR\Common\Http\HttpRestRequest;
 use OpenEMR\Services\FHIR\FhirAllergyIntoleranceService;
 use OpenEMR\Services\FHIR\FhirResourcesService;
+use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRAllergyIntolerance;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
 
 class FhirAllergyIntoleranceRestController
 {
     private $fhirAllergyIntoleranceService;
     private $fhirService;
+    private $fhirValidate;
 
-    public function __construct(HttpRestRequest $request)
+    public function __construct(?HttpRestRequest $request = null)
     {
-        $this->fhirAllergyIntoleranceService = new FhirAllergyIntoleranceService($request->getApiBaseFullUrl());
+        $apiBaseUrl = $request ? $request->getApiBaseFullUrl() : null;
+        $this->fhirAllergyIntoleranceService = new FhirAllergyIntoleranceService($apiBaseUrl);
         $this->fhirService = new FhirResourcesService();
+        $this->fhirValidate = new FhirValidationService();
+    }
+
+    /**
+     * Creates a new FHIR allergyIntolerance resource
+     * @param $fhirJson The FHIR allergyIntolerance resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIRAllergyIntolerance object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty AllergyIntolerance resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            if (!($fhirResource instanceof FHIRAllergyIntolerance)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Resource must be of type AllergyIntolerance'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+
+            $processingResult = $this->fhirAllergyIntoleranceService->insert($fhirResource);
+            $result = RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+            return $result;
+        } catch (\Throwable $e) {
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing AllergyIntolerance',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
     }
 
     /**
