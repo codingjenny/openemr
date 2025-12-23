@@ -676,6 +676,8 @@ class FhirBundleRestController
                 return $this->processMedicationResource($method, $resourceId, $resourceArray, $reusedController);
             case 'medicationrequest':
                 return $this->processMedicationRequestResource($method, $resourceId, $resourceArray, $reusedController);
+            case 'careteam':
+                return $this->processCareTeamResource($method, $resourceId, $resourceArray, $reusedController);
             default:
                 // For unsupported resource types, return a not-supported response
                 return [
@@ -2024,6 +2026,111 @@ class FhirBundleRestController
     }
 
     /**
+     * Process CareTeam resource
+     * @param string $method HTTP method (POST, PUT, etc.)
+     * @param string|null $resourceId Resource ID for PUT operations
+     * @param array $resourceArray Resource data as array
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
+     */
+    private function processCareTeamResource($method, $resourceId, $resourceArray, $reusedController = null)
+    {
+        $controller = $reusedController ?? new FhirCareTeamRestController();
+        
+        try {
+            if ($method === 'POST') {
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                } elseif (empty($body)) {
+                    $statusCode = 404;
+                }
+                
+                // Extract ID from FHIR resource if it's an object
+                $createdResourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $createdResourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $createdResourceId = $body['id'];
+                }
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $createdResourceId ? '/fhir/CareTeam/' . $createdResourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                // PUT not yet implemented for CareTeam
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "PUT method not yet supported for CareTeam resource"
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '400',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => "Method '$method' not supported for CareTeam resource"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process CareTeam resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
      * Queue a FHIR Bundle for background processing
      * @param array $fhirJson The FHIR bundle resource (array)
      * @return array Response with 202 Accepted status and queue ID
@@ -2284,6 +2391,8 @@ class FhirBundleRestController
                 return new FhirConditionRestController();
             case 'careplan':
                 return new FhirCarePlanRestController();
+            case 'careteam':
+                return new FhirCareTeamRestController();
             case 'procedure':
                 return new FhirProcedureRestController();
             default:

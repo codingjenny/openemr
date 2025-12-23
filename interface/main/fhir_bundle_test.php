@@ -245,6 +245,7 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         <option value="patient_procedure"><?php echo xlt('範例：Patient + Procedure'); ?></option>
                         <option value="patient_encounter_procedure"><?php echo xlt('範例：Patient + Encounter + Procedure'); ?></option>
                         <option value="patient_careplan"><?php echo xlt('範例：Patient + CarePlan'); ?></option>
+                        <option value="patient_careteam"><?php echo xlt('範例：Patient + CareTeam'); ?></option>
                         <option value="patient_encounter_diagnosticreport"><?php echo xlt('範例：Patient + Encounter + DiagnosticReport'); ?></option>
                         <option value="patient_questionnaire_response"><?php echo xlt('範例：Patient + QuestionnaireResponse'); ?></option>
                         <option value="patient_medication"><?php echo xlt('範例：Patient + Medication'); ?></option>
@@ -1217,6 +1218,186 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                             "request": {
                                 "method": "POST",
                                 "url": "CarePlan"
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_careteam') {
+                // Patient + CareTeam transaction bundle
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-ct-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Wang",
+                                        "given": ["Xiao", "Ming"]
+                                    }
+                                ],
+                                "gender": "male",
+                                "birthDate": "1990-01-01",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0912345678"
+                                    },
+                                    {
+                                        "system": "email",
+                                        "value": "wang.xiaoming@example.com"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["123 Main Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "100",
+                                        "country": "TW"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:practitioner-ct-001",
+                            "resource": {
+                                "resourceType": "Practitioner",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Lee",
+                                        "given": ["Dr.", "Wei", "Ming"],
+                                        "prefix": ["Dr."]
+                                    }
+                                ],
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "02-12345678",
+                                        "use": "work"
+                                    }
+                                ],
+                                "qualification": [
+                                    {
+                                        "code": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0360",
+                                                    "code": "MD",
+                                                    "display": "Doctor of Medicine"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Practitioner"
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:organization-ct-001",
+                            "resource": {
+                                "resourceType": "Organization",
+                                "name": "Taipei General Hospital",
+                                "type": [
+                                    {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                                "code": "prov",
+                                                "display": "Healthcare Provider"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "02-87654321"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["456 Hospital Road"],
+                                        "city": "Taipei",
+                                        "postalCode": "100",
+                                        "country": "TW"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Organization"
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "CareTeam",
+                                "status": "active",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-ct-001"
+                                },
+                                "participant": [
+                                    {
+                                        "role": [
+                                            {
+                                                "coding": [
+                                                    {
+                                                        "system": "http://snomed.info/sct",
+                                                        "code": "17561000",
+                                                        "display": "Cardiologist"
+                                                    }
+                                                ],
+                                                "text": "Primary Care Physician"
+                                            }
+                                        ],
+                                        "member": {
+                                            "reference": "urn:uuid:practitioner-ct-001"
+                                        },
+                                        "onBehalfOf": {
+                                            "reference": "urn:uuid:organization-ct-001"
+                                        }
+                                    },
+                                    {
+                                        "role": [
+                                            {
+                                                "coding": [
+                                                    {
+                                                        "system": "http://snomed.info/sct",
+                                                        "code": "223366009",
+                                                        "display": "Healthcare facility"
+                                                    }
+                                                ],
+                                                "text": "Healthcare facility"
+                                            }
+                                        ],
+                                        "member": {
+                                            "reference": "urn:uuid:organization-ct-001"
+                                        }
+                                    }
+                                ],
+                                "period": {
+                                    "start": "2024-01-15"
+                                },
+                                "name": "Primary Care Team",
+                                "note": [
+                                    {
+                                        "text": "Primary care team for chronic disease management"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "CareTeam"
                             }
                         }
                     ]
