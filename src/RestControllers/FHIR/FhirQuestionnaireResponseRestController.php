@@ -17,9 +17,13 @@ use OpenEMR\Common\Http\HttpRestRequest;
 use OpenEMR\Common\Http\HttpRestRouteHandler;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\FHIR\DomainModels\OpenEMRFhirQuestionnaireResponse;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRQuestionnaireResponse;
 use OpenEMR\Services\FHIR\FhirQuestionnaireResponseService;
+use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\Services\FHIR\FhirResourcesService;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
 use Psr\Http\Message\ResponseInterface;
 
 class FhirQuestionnaireResponseRestController
@@ -35,12 +39,18 @@ class FhirQuestionnaireResponseRestController
     private FhirResourcesService $fhirService;
 
     /**
+     * @var FhirValidationService
+     */
+    private $fhirValidate;
+
+    /**
      * @param ?FhirQuestionnaireResponseService $resourceService
      */
     public function __construct(?FhirQuestionnaireResponseService $resourceService = null)
     {
-        $this->resourceService = $resourceService;
+        $this->resourceService = $resourceService ?? new FhirQuestionnaireResponseService();
         $this->fhirService = new FhirResourcesService();
+        $this->fhirValidate = new FhirValidationService();
     }
 
     /**
@@ -116,6 +126,85 @@ class FhirQuestionnaireResponseRestController
         return $this->fhirService->createBundle('Questionnaire', $bundleEntries, false);
     }
 
-    // TODO: @adunsulag create is defined in the private assessment module but depends on the symfony object deserializer...
-    // before we can bring this into core we need to check w/ admin team on adding dependency
+    /**
+     * Creates a new FHIR questionnaire response resource
+     * @param $fhirJson The FHIR questionnaire response resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIRQuestionnaireResponse object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty QuestionnaireResponse resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            // Accept both FHIRQuestionnaireResponse and OpenEMRFhirQuestionnaireResponse
+            if (!($fhirResource instanceof FHIRQuestionnaireResponse)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Invalid QuestionnaireResponse resource'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            // Convert to OpenEMRFhirQuestionnaireResponse if needed
+            if (!($fhirResource instanceof OpenEMRFhirQuestionnaireResponse)) {
+                // Use json_decode/encode to convert objects to arrays
+                $jsonString = json_encode($fhirResource->jsonSerialize());
+                $dataArray = json_decode($jsonString, true);
+                $fhirResource = new OpenEMRFhirQuestionnaireResponse($dataArray);
+            }
+
+            $processingResult = $this->resourceService->insert($fhirResource);
+            return RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+        } catch (\Exception $e) {
+            return RestControllerHelper::responseHandler(
+                [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ],
+                null,
+                500
+            );
+        }
+    }
 }

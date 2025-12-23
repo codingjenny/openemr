@@ -13,8 +13,11 @@ namespace OpenEMR\RestControllers\FHIR;
 
 use OpenEMR\Services\FHIR\FhirDiagnosticReportService;
 use OpenEMR\Services\FHIR\FhirResourcesService;
+use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRDiagnosticReport;
 use OpenEMR\Validators\ProcessingResult;
 
 class FhirDiagnosticReportRestController
@@ -24,11 +27,86 @@ class FhirDiagnosticReportRestController
      * @var FhirDiagnosticReportService
      */
     private $service;
+    private $fhirValidate;
 
     public function __construct()
     {
         $this->fhirService = new FhirResourcesService();
         $this->service = new FhirDiagnosticReportService();
+        $this->fhirValidate = new FhirValidationService();
+    }
+
+    /**
+     * Creates a new FHIR diagnostic report resource
+     * @param $fhirJson The FHIR diagnostic report resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIRDiagnosticReport object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty DiagnosticReport resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            if (!($fhirResource instanceof FHIRDiagnosticReport)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Invalid DiagnosticReport resource'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+
+            $processingResult = $this->service->insert($fhirResource);
+            return RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+        } catch (\Exception $e) {
+            return RestControllerHelper::responseHandler(
+                [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => 'Error processing DiagnosticReport: ' . $e->getMessage()
+                        ]
+                    ]
+                ],
+                null,
+                500
+            );
+        }
     }
 
     /**

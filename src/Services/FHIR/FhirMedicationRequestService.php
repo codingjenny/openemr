@@ -19,14 +19,24 @@ use OpenEMR\FHIR\R4\FHIRResource\FHIRTiming;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRTiming\FHIRTimingRepeat;
 use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
 use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
-use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
 use OpenEMR\Services\FHIR\Traits\PatientSearchTrait;
 use OpenEMR\Services\ListService;
+use OpenEMR\Services\PatientService;
+use OpenEMR\Services\EncounterService;
+use OpenEMR\Services\UserService;
 use OpenEMR\Services\PrescriptionService;
 use OpenEMR\Services\Search\FhirSearchParameterDefinition;
 use OpenEMR\Services\Search\SearchFieldType;
 use OpenEMR\Services\Search\ServiceField;
 use OpenEMR\Validators\ProcessingResult;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
+use OpenEMR\Services\Search\TokenSearchField;
+use OpenEMR\Services\Search\TokenSearchValue;
+use OpenEMR\Common\Database\QueryUtils;
+use InvalidArgumentException;
+use Exception;
 
 /**
  * NOTE: when making modifications to this class follow all the guidance in the US Core Medication List guidance
@@ -35,10 +45,9 @@ use OpenEMR\Validators\ProcessingResult;
  * Class FhirMedicationRequestService
  * @package OpenEMR\Services\FHIR
  */
-class FhirMedicationRequestService extends FhirServiceBase implements IResourceUSCIGProfileService, IFhirExportableResourceService, IPatientCompartmentResourceService
+class FhirMedicationRequestService extends FhirServiceBase implements IResourceUSCIGProfileService, IFhirExportableResourceService, IPatientCompartmentResourceService, IResourceCreatableService
 {
     use PatientSearchTrait;
-    use FhirServiceBaseEmptyTrait;
     use BulkExportSupportAllOperationsTrait;
     use FhirBulkExportDomainResourceTrait;
 
@@ -387,5 +396,266 @@ class FhirMedicationRequestService extends FhirServiceBase implements IResourceU
     function getProfileURIs(): array
     {
         return [self::PROFILE_URI];
+    }
+
+    /**
+     * Parses a FHIR MedicationRequest resource into an OpenEMR prescription record array
+     * 
+     * @param FHIRDomainResource $fhirResource The FHIR MedicationRequest resource
+     * @return array The OpenEMR prescription record array
+     */
+    public function parseFhirResource(FHIRDomainResource $fhirResource): array
+    {
+        if (!($fhirResource instanceof FHIRMedicationRequest)) {
+            throw new InvalidArgumentException("Resource must be a FHIRMedicationRequest");
+        }
+
+        $parsedResource = [];
+
+        // subject (patient) - required
+        if (!empty($fhirResource->getSubject())) {
+            $parsedReference = UtilsService::parseReference($fhirResource->getSubject());
+            if ($parsedReference['localResource'] && $parsedReference['type'] === 'Patient') {
+                $parsedResource['puuid'] = $parsedReference['uuid'];
+            } else {
+                throw new InvalidArgumentException("Subject must be a local Patient resource");
+            }
+        } else {
+            throw new InvalidArgumentException("Subject (patient) is required");
+        }
+
+        // encounter - optional
+        if (!empty($fhirResource->getEncounter())) {
+            $parsedReference = UtilsService::parseReference($fhirResource->getEncounter());
+            if ($parsedReference['localResource']) {
+                $parsedResource['euuid'] = $parsedReference['uuid'];
+            }
+        }
+
+        // requester (practitioner) - optional
+        if (!empty($fhirResource->getRequester())) {
+            $parsedReference = UtilsService::parseReference($fhirResource->getRequester());
+            if ($parsedReference['localResource'] && $parsedReference['type'] === 'Practitioner') {
+                $parsedResource['pruuid'] = $parsedReference['uuid'];
+            }
+        }
+
+        // medication - required (we only support CodeableConcept for now)
+        if (!empty($fhirResource->getMedicationCodeableConcept())) {
+            $medication = $fhirResource->getMedicationCodeableConcept();
+            // Try to extract RxNorm code
+            $codings = $medication->getCoding();
+            if (!empty($codings)) {
+                foreach ($codings as $coding) {
+                    if ($coding->getSystem() === FhirCodeSystemConstants::RXNORM && !empty($coding->getCode())) {
+                        $parsedResource['drug_rxnorm'] = $coding->getCode();
+                        break;
+                    }
+                }
+            }
+            // Extract medication name from text or display
+            if (!empty($medication->getText())) {
+                $parsedResource['drug'] = $medication->getText();
+            } elseif (!empty($codings) && !empty($codings[0]->getDisplay())) {
+                $parsedResource['drug'] = $codings[0]->getDisplay();
+            }
+        } elseif (!empty($fhirResource->getMedicationReference())) {
+            throw new InvalidArgumentException("MedicationReference is not yet supported. Please use medicationCodeableConcept instead.");
+        }
+
+        // status - required
+        if (!empty($fhirResource->getStatus())) {
+            $status = $fhirResource->getStatus();
+            $validStatii = [self::MEDICATION_REQUEST_STATUS_ACTIVE, self::MEDICATION_REQUEST_STATUS_COMPLETED, 
+                           self::MEDICATION_REQUEST_STATUS_STOPPED];
+            if (in_array($status, $validStatii)) {
+                $parsedResource['status'] = $status;
+            }
+        }
+
+        // intent - required
+        if (!empty($fhirResource->getIntent())) {
+            $parsedResource['intent'] = $fhirResource->getIntent();
+        }
+
+        // category - optional
+        $categories = $fhirResource->getCategory();
+        if (!empty($categories)) {
+            $category = $categories[0];
+            $codings = $category->getCoding();
+            if (!empty($codings)) {
+                foreach ($codings as $coding) {
+                    if ($coding->getSystem() === FhirCodeSystemConstants::HL7_MEDICATION_REQUEST_CATEGORY) {
+                        $parsedResource['category'] = $coding->getCode();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // authoredOn - optional
+        if (!empty($fhirResource->getAuthoredOn())) {
+            $parsedResource['date_added'] = $fhirResource->getAuthoredOn()->getValue();
+        }
+
+        // dosageInstruction - optional
+        $dosageInstructions = $fhirResource->getDosageInstruction();
+        if (!empty($dosageInstructions)) {
+            $dosage = $dosageInstructions[0];
+            if (is_array($dosage) && isset($dosage['text'])) {
+                $parsedResource['dosage_instructions'] = $dosage['text'];
+            } elseif (is_object($dosage) && method_exists($dosage, 'getText')) {
+                $parsedResource['dosage_instructions'] = $dosage->getText();
+            }
+        }
+
+        // note - optional
+        $notes = $fhirResource->getNote();
+        if (!empty($notes)) {
+            $note = $notes[0];
+            if (is_object($note) && method_exists($note, 'getText')) {
+                $parsedResource['note'] = $note->getText();
+            }
+        }
+
+        return $parsedResource;
+    }
+
+    /**
+     * Inserts an OpenEMR prescription record into the database
+     * 
+     * @param array $openEmrRecord The OpenEMR prescription record
+     * @return ProcessingResult
+     */
+    public function insertOpenEMRRecord($openEmrRecord): ProcessingResult
+    {
+        $processingResult = new ProcessingResult();
+
+        try {
+            // Validate required fields
+            if (empty($openEmrRecord['puuid'])) {
+                throw new InvalidArgumentException("Patient UUID is required");
+            }
+            if (empty($openEmrRecord['drug'])) {
+                throw new InvalidArgumentException("Drug name is required");
+            }
+
+            // Get patient ID
+            $patientService = new PatientService();
+            $patientRecords = ProcessingResult::extractDataArray($patientService->getOne($openEmrRecord['puuid']));
+            if (empty($patientRecords)) {
+                throw new InvalidArgumentException("Patient does not exist");
+            }
+            $patientId = $patientRecords[0]['pid'];
+
+            // Get encounter ID if provided
+            $encounterId = null;
+            if (!empty($openEmrRecord['euuid'])) {
+                $encounterService = new EncounterService();
+                $encounterRecords = ProcessingResult::extractDataArray($encounterService->getEncounter($openEmrRecord['euuid']));
+                if (!empty($encounterRecords)) {
+                    $encounterId = $encounterRecords[0]['encounter'];
+                }
+            }
+
+            // Get provider ID if provided
+            $providerId = null;
+            if (!empty($openEmrRecord['pruuid'])) {
+                $userService = new UserService();
+                $userRecords = ProcessingResult::extractDataArray($userService->getUser($openEmrRecord['pruuid']));
+                if (!empty($userRecords)) {
+                    $providerId = $userRecords[0]['id'];
+                }
+            }
+
+            // Generate UUID for new prescription
+            $uuid = UuidRegistry::getRegistryForTable('prescriptions')->createUuid();
+
+            // Prepare data for insertion
+            $prescriptionData = [
+                'uuid' => $uuid,
+                'patient_id' => $patientId,
+                'drug' => $openEmrRecord['drug'],
+                'active' => 1,
+                'date_added' => $openEmrRecord['date_added'] ?? date('Y-m-d H:i:s'),
+                'date_modified' => date('Y-m-d H:i:s'),
+            ];
+
+            // Optional fields
+            if (!empty($encounterId)) {
+                $prescriptionData['encounter'] = $encounterId;
+            }
+            if (!empty($providerId)) {
+                $prescriptionData['provider_id'] = $providerId;
+            }
+            if (!empty($openEmrRecord['drug_rxnorm'])) {
+                $prescriptionData['rxnorm_drugcode'] = $openEmrRecord['drug_rxnorm'];
+            }
+            if (!empty($openEmrRecord['dosage_instructions'])) {
+                $prescriptionData['drug_dosage_instructions'] = $openEmrRecord['dosage_instructions'];
+            }
+            if (!empty($openEmrRecord['note'])) {
+                $prescriptionData['note'] = $openEmrRecord['note'];
+            }
+
+            // Build INSERT query
+            $fields = [];
+            $binds = [];
+            foreach ($prescriptionData as $field => $value) {
+                if ($field !== 'uuid') {
+                    $fields[] = "`$field` = ?";
+                    $binds[] = $value;
+                } else {
+                    $fields[] = "`$field` = ?";
+                    $binds[] = UuidRegistry::uuidToBytes($value);
+                }
+            }
+
+            $sql = "INSERT INTO prescriptions SET " . implode(', ', $fields);
+            $result = sqlInsert($sql, $binds);
+
+            if ($result) {
+                // Use the EXACT same pattern as DiagnosticReport
+                $uuidString = UuidRegistry::uuidToString($uuid);
+                
+                // Fetch the complete record using search - EXACTLY like DiagnosticReport does
+                $search = [
+                    'uuid' => new TokenSearchField('uuid', new TokenSearchValue($uuidString, false))
+                ];
+                $searchResult = $this->prescriptionService->getAll($search);
+                
+                if ($searchResult->hasData() && count($searchResult->getData()) > 0) {
+                    $prescription = $searchResult->getData()[0];
+                    
+                    // Convert to FHIR resource
+                    $fhirResource = $this->parseOpenEMRRecord($prescription, false);
+                    $processingResult->setData([]);
+                    $processingResult->addData($fhirResource);
+                } else {
+                    $processingResult->addInternalError("Failed to retrieve inserted prescription record");
+                }
+            } else {
+                $processingResult->setInternalErrors("Failed to insert prescription");
+            }
+
+        } catch (Exception $exception) {
+            $processingResult->setInternalErrors($exception->getMessage());
+        }
+
+        return $processingResult;
+    }
+
+    /**
+     * Updates an OpenEMR prescription record
+     * 
+     * @param string $fhirResourceId The FHIR resource ID (UUID)
+     * @param array $updatedOpenEMRRecord The updated OpenEMR record
+     * @return ProcessingResult
+     */
+    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord): ProcessingResult
+    {
+        $processingResult = new ProcessingResult();
+        $processingResult->addInternalError("Update not yet implemented for MedicationRequest");
+        return $processingResult;
     }
 }

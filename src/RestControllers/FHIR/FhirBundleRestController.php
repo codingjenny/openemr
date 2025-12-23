@@ -15,6 +15,8 @@ namespace OpenEMR\RestControllers\FHIR;
 use OpenEMR\Services\FHIR\FhirResourcesService;
 use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
+use OpenEMR\RestControllers\FHIR\FhirMedicationRestController;
+use OpenEMR\RestControllers\FHIR\FhirMedicationRequestRestController;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleResponse;
@@ -514,6 +516,7 @@ class FhirBundleRestController
         $request = $entry['request'] ?? null;
         $resource = $entry['resource'] ?? null;
         
+        
         // Ensure resource is an array for processing
         if (is_object($resource) && method_exists($resource, 'jsonSerialize')) {
             $resource = $resource->jsonSerialize();
@@ -625,6 +628,7 @@ class FhirBundleRestController
         if (!$resourceType) {
             throw new \Exception("Invalid URL format: $url. Expected format: /fhir/ResourceType or ResourceType");
         }
+        
 
         // getResource() already returns jsonSerialize() result (array), so use it directly
         // If it's not an array, try to convert it
@@ -642,6 +646,8 @@ class FhirBundleRestController
             throw new \Exception("Invalid resource data format");
         }
 
+        error_log("FhirBundleRestController::routeToController - resourceType: " . $resourceType . ", method: " . $method);
+        
         // Route to appropriate controller based on resource type
         switch (strtolower($resourceType)) {
             case 'patient':
@@ -662,6 +668,14 @@ class FhirBundleRestController
                 return $this->processCarePlanResource($method, $resourceId, $resourceArray, $reusedController);
             case 'procedure':
                 return $this->processProcedureResource($method, $resourceId, $resourceArray, $reusedController);
+            case 'diagnosticreport':
+                return $this->processDiagnosticReportResource($method, $resourceId, $resourceArray, $reusedController);
+            case 'questionnaireresponse':
+                return $this->processQuestionnaireResponseResource($method, $resourceId, $resourceArray, $reusedController);
+            case 'medication':
+                return $this->processMedicationResource($method, $resourceId, $resourceArray, $reusedController);
+            case 'medicationrequest':
+                return $this->processMedicationRequestResource($method, $resourceId, $resourceArray, $reusedController);
             default:
                 // For unsupported resource types, return a not-supported response
                 return [
@@ -1571,6 +1585,423 @@ class FhirBundleRestController
             }
         } catch (\Exception $e) {
             $this->logger->error("Failed to process Procedure resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Process DiagnosticReport resource
+     * @param string $method HTTP method (POST, PUT, etc.)
+     * @param string|null $resourceId Resource ID for PUT operations
+     * @param array $resourceArray Resource data as array
+     * @param object|null $reusedController Optional controller to reuse (for batch processing)
+     */
+    private function processDiagnosticReportResource($method, $resourceId, $resourceArray, $reusedController = null)
+    {
+        $controller = $reusedController ?? new FhirDiagnosticReportRestController();
+        
+        try {
+            if ($method === 'POST') {
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                } elseif (empty($body)) {
+                    $statusCode = 404;
+                }
+                
+                // Extract ID from FHIR resource if it's an object
+                $createdResourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $createdResourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $createdResourceId = $body['id'];
+                }
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $createdResourceId ? '/fhir/DiagnosticReport/' . $createdResourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                // PUT not yet implemented for DiagnosticReport
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => 'PUT method not yet implemented for DiagnosticReport'
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '405',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "Method $method not supported for DiagnosticReport"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process DiagnosticReport resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Process QuestionnaireResponse resource for Bundle
+     */
+    private function processQuestionnaireResponseResource($method, $resourceId, $resourceArray, $reusedController = null)
+    {
+        $fhirQuestionnaireService = new \OpenEMR\Services\FHIR\FhirQuestionnaireResponseService();
+        $fhirQuestionnaireService->addMappedService(new \OpenEMR\Services\FHIR\QuestionnaireResponse\FhirQuestionnaireResponseFormService());
+        $controller = $reusedController ?? new FhirQuestionnaireResponseRestController($fhirQuestionnaireService);
+        
+        try {
+            if ($method === 'POST') {
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                } elseif (empty($body)) {
+                    $statusCode = 404;
+                }
+                
+                // Extract ID from FHIR resource if it's an object
+                $createdResourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $createdResourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $createdResourceId = $body['id'];
+                }
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $createdResourceId ? '/fhir/QuestionnaireResponse/' . $createdResourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                // PUT not yet implemented for QuestionnaireResponse
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => 'PUT method not yet implemented for QuestionnaireResponse'
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "Method $method not supported for QuestionnaireResponse"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process QuestionnaireResponse resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    /**
+     * Process a MedicationRequest resource within a bundle
+     * @param string $method HTTP method (POST, PUT, etc.)
+     * @param string $resourceId Resource ID if specified
+     * @param array $resourceArray The MedicationRequest resource as an array
+     * @param object $reusedController Optional controller to reuse
+     * @return array Response array with status, location, and resource
+     */
+    private function processMedicationResource($method, $resourceId, $resourceArray, $reusedController = null)
+    {
+        error_log("FhirBundleRestController::processMedicationResource - START, method: " . $method);
+        $controller = $reusedController ?? new FhirMedicationRestController();
+        
+        try {
+            if ($method === 'POST') {
+                error_log("FhirBundleRestController::processMedicationResource - Processing POST");
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                } elseif (empty($body)) {
+                    $statusCode = 404;
+                }
+                
+                // Extract ID from FHIR resource if it's an object
+                $createdResourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $createdResourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $createdResourceId = $body['id'];
+                }
+                
+                error_log("FhirBundleRestController::processMedicationResource - Returning status: $statusCode, createdResourceId: " . ($createdResourceId ?? 'NULL'));
+                error_log("FhirBundleRestController::processMedicationResource - Resource body: " . json_encode($body));
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $createdResourceId ? '/fhir/Medication/' . $createdResourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => 'PUT method not yet implemented for Medication'
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '405',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "Method $method not supported for Medication"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process Medication resource", [
+                'method' => $method,
+                'resourceId' => $resourceId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [
+                'status' => '500',
+                'outcome' => [
+                    'resourceType' => 'OperationOutcome',
+                    'issue' => [
+                        [
+                            'severity' => 'error',
+                            'code' => 'exception',
+                            'diagnostics' => $e->getMessage()
+                        ]
+                    ]
+                ]
+            ];
+        }
+    }
+
+    private function processMedicationRequestResource($method, $resourceId, $resourceArray, $reusedController = null)
+    {
+        $controller = $reusedController ?? new FhirMedicationRequestRestController();
+        
+        try {
+            if ($method === 'POST') {
+                $statusCode = null;
+                $result = $controller->post($resourceArray);
+                $statusCode = http_response_code() ?: 201;
+                
+                // Check if result is a FHIR resource object or an array
+                if (is_object($result) && method_exists($result, 'jsonSerialize')) {
+                    // It's a FHIR resource object, convert to array
+                    $body = $result->jsonSerialize();
+                } elseif (is_array($result)) {
+                    $body = $result;
+                } else {
+                    $body = null;
+                }
+                
+                
+                // Check for validation errors
+                if (isset($body['validationErrors']) && !empty($body['validationErrors'])) {
+                    $statusCode = 400;
+                } elseif (isset($body['internalErrors']) && !empty($body['internalErrors'])) {
+                    $statusCode = 500;
+                } elseif (empty($body)) {
+                    $statusCode = 404;
+                }
+                
+                // Extract ID from FHIR resource if it's an object
+                $createdResourceId = null;
+                if (is_object($result) && method_exists($result, 'getId')) {
+                    $idObj = $result->getId();
+                    if (is_object($idObj) && method_exists($idObj, 'getValue')) {
+                        $createdResourceId = $idObj->getValue();
+                    }
+                } elseif (is_array($body) && isset($body['id'])) {
+                    $createdResourceId = $body['id'];
+                }
+                
+                return [
+                    'status' => (string)$statusCode,
+                    'location' => $createdResourceId ? '/fhir/MedicationRequest/' . $createdResourceId : null,
+                    'resource' => $body
+                ];
+            } elseif ($method === 'PUT' && $resourceId) {
+                // PUT not yet implemented for MedicationRequest
+                return [
+                    'status' => '501',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => 'PUT method not yet implemented for MedicationRequest'
+                            ]
+                        ]
+                    ]
+                ];
+            } else {
+                return [
+                    'status' => '405',
+                    'outcome' => [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'not-supported',
+                                'diagnostics' => "Method $method not supported for MedicationRequest"
+                            ]
+                        ]
+                    ]
+                ];
+            }
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to process MedicationRequest resource", [
                 'method' => $method,
                 'resourceId' => $resourceId,
                 'error' => $e->getMessage(),

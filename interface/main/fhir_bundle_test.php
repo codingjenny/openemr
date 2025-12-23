@@ -245,6 +245,10 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         <option value="patient_procedure"><?php echo xlt('範例：Patient + Procedure'); ?></option>
                         <option value="patient_encounter_procedure"><?php echo xlt('範例：Patient + Encounter + Procedure'); ?></option>
                         <option value="patient_careplan"><?php echo xlt('範例：Patient + CarePlan'); ?></option>
+                        <option value="patient_encounter_diagnosticreport"><?php echo xlt('範例：Patient + Encounter + DiagnosticReport'); ?></option>
+                        <option value="patient_questionnaire_response"><?php echo xlt('範例：Patient + QuestionnaireResponse'); ?></option>
+                        <option value="patient_medication"><?php echo xlt('範例：Patient + Medication'); ?></option>
+                        <option value="patient_medication_request"><?php echo xlt('範例：Patient + MedicationRequest'); ?></option>
                         <option value="multiple_patients"><?php echo xlt('範例：多個 Patient'); ?></option>
                     </select>
                 </div>
@@ -1217,6 +1221,111 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         }
                     ]
                 };
+            } else if (type === 'patient_encounter_diagnosticreport') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-001",
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Chen",
+                                        "given": ["Xiao", "Hua"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1985-03-20",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0945678901"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:encounter-001",
+                            "resource": {
+                                "resourceType": "Encounter",
+                                "status": "finished",
+                                "class": {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                                    "code": "AMB",
+                                    "display": "ambulatory"
+                                },
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "period": {
+                                    "start": "2024-01-15T09:00:00Z",
+                                    "end": "2024-01-15T10:00:00Z"
+                                },
+                                "reasonCode": [
+                                    {
+                                        "text": "Annual health examination"
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "Encounter"
+                            }
+                        },
+                        {
+                            "resource": {
+                                "resourceType": "DiagnosticReport",
+                                "status": "final",
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://loinc.org",
+                                            "code": "11506-3",
+                                            "display": "Progress Note"
+                                        }
+                                    ],
+                                    "text": "Progress Note"
+                                },
+                                "category": [
+                                    {
+                                        "coding": [
+                                            {
+                                                "system": "http://loinc.org",
+                                                "code": "LP29684-5",
+                                                "display": "Radiology"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "subject": {
+                                    "reference": "urn:uuid:patient-001"
+                                },
+                                "encounter": {
+                                    "reference": "urn:uuid:encounter-001"
+                                },
+                                "effectiveDateTime": "2024-01-15T09:30:00Z",
+                                "issued": "2024-01-15T10:00:00Z",
+                                "presentedForm": [
+                                    {
+                                        "contentType": "text/plain",
+                                        "data": "UGF0aWVudCBzaG93cyBpbXByb3ZlbWVudCBzaW5jZSBsYXN0IHZpc2l0LiBDb250aW51ZSBjdXJyZW50IHRyZWF0bWVudCBwbGFuLg=="
+                                    }
+                                ]
+                            },
+                            "request": {
+                                "method": "POST",
+                                "url": "DiagnosticReport"
+                            }
+                        }
+                    ]
+                };
             } else if (type === 'multiple_patients') {
                 example = {
                     "resourceType": "Bundle",
@@ -1305,6 +1414,212 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                         "city": "Taichung",
                                         "postalCode": "400",
                                         "country": "TW"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_questionnaire_response') {
+                // 注意：QuestionnaireResponse 需要引用一个存在的 Questionnaire
+                // 請先確保系統中有 Questionnaire，或修改 questionnaire 欄位為您系統中的 UUID
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-qr-001",
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            },
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Wang",
+                                        "given": ["Yi", "Chen"]
+                                    }
+                                ],
+                                "gender": "female",
+                                "birthDate": "1988-07-12",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0912345678"
+                                    },
+                                    {
+                                        "system": "email",
+                                        "value": "wang.yichen@example.com"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:questionnaire-response-001",
+                            "request": {
+                                "method": "POST",
+                                "url": "QuestionnaireResponse"
+                            },
+                            "resource": {
+                                "resourceType": "QuestionnaireResponse",
+                                "status": "completed",
+                                "authored": "2024-12-16T10:30:00Z",
+                                "subject": {
+                                    "reference": "urn:uuid:patient-qr-001"
+                                },
+                                "questionnaire": "http://example.org/fhir/Questionnaire/phq9",
+                                "item": [
+                                    {
+                                        "linkId": "1",
+                                        "text": "Little interest or pleasure in doing things?",
+                                        "answer": [
+                                            {
+                                                "valueCoding": {
+                                                    "system": "http://loinc.org",
+                                                    "code": "LA6568-5",
+                                                    "display": "Not at all"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "linkId": "2",
+                                        "text": "Feeling down, depressed, or hopeless?",
+                                        "answer": [
+                                            {
+                                                "valueCoding": {
+                                                    "system": "http://loinc.org",
+                                                    "code": "LA6569-3",
+                                                    "display": "Several days"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "linkId": "3",
+                                        "text": "Trouble falling or staying asleep, or sleeping too much?",
+                                        "answer": [
+                                            {
+                                                "valueCoding": {
+                                                    "system": "http://loinc.org",
+                                                    "code": "LA6568-5",
+                                                    "display": "Not at all"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_medication') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:medication-001",
+                            "request": {
+                                "method": "POST",
+                                "url": "Medication"
+                            },
+                            "resource": {
+                                "resourceType": "Medication",
+                                "status": "active",
+                                "code": {
+                                    "coding": [
+                                        {
+                                            "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                                            "code": "1049502",
+                                            "display": "Amoxicillin 250 MG Oral Capsule"
+                                        }
+                                    ],
+                                    "text": "Amoxicillin 250 MG Oral Capsule"
+                                },
+                                "form": {
+                                    "coding": [
+                                        {
+                                            "system": "http://snomed.info/sct",
+                                            "code": "385055001",
+                                            "display": "Tablet"
+                                        }
+                                    ],
+                                    "text": "Tablet"
+                                }
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_medication_request') {
+                var patientUuid = "urn:uuid:patient-mr-001";
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": patientUuid,
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            },
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Chen",
+                                        "given": ["Ming", "Hua"]
+                                    }
+                                ],
+                                "gender": "male",
+                                "birthDate": "1975-03-20",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0987654321"
+                                    },
+                                    {
+                                        "system": "email",
+                                        "value": "chen.minghua@example.com"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "fullUrl": "urn:uuid:medication-request-001",
+                            "request": {
+                                "method": "POST",
+                                "url": "MedicationRequest"
+                            },
+                            "resource": {
+                                "resourceType": "MedicationRequest",
+                                "status": "active",
+                                "intent": "order",
+                                "subject": {
+                                    "reference": patientUuid
+                                },
+                                "medicationCodeableConcept": {
+                                    "coding": [
+                                        {
+                                            "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                                            "code": "1049221",
+                                            "display": "Acetaminophen 325 MG Oral Tablet"
+                                        }
+                                    ],
+                                    "text": "Acetaminophen 325mg tablet"
+                                },
+                                "authoredOn": "2024-12-16T10:00:00Z",
+                                "dosageInstruction": [
+                                    {
+                                        "text": "Take 1-2 tablets by mouth every 4-6 hours as needed for pain. Do not exceed 8 tablets in 24 hours."
+                                    }
+                                ],
+                                "note": [
+                                    {
+                                        "text": "Patient reported allergy to aspirin. Use acetaminophen for fever and pain management."
                                     }
                                 ]
                             }

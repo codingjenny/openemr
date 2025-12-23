@@ -12,11 +12,12 @@
 namespace OpenEMR\Services\FHIR;
 
 use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRDiagnosticReport;
+use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
 use OpenEMR\Services\FHIR\DiagnosticReport\FhirDiagnosticReportClinicalNotesService;
 use OpenEMR\Services\FHIR\DiagnosticReport\FhirDiagnosticReportLaboratoryService;
 use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
 use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
-use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
 use OpenEMR\Services\FHIR\Traits\MappedServiceCodeTrait;
 use OpenEMR\Services\FHIR\Traits\PatientSearchTrait;
 use OpenEMR\Services\Search\FhirSearchParameterDefinition;
@@ -30,7 +31,6 @@ use OpenEMR\Validators\ProcessingResult;
 class FhirDiagnosticReportService extends FhirServiceBase implements IPatientCompartmentResourceService, IResourceUSCIGProfileService, IFhirExportableResourceService
 {
     use PatientSearchTrait;
-    use FhirServiceBaseEmptyTrait;
     use MappedServiceCodeTrait;
     use BulkExportSupportAllOperationsTrait;
     use FhirBulkExportDomainResourceTrait;
@@ -119,5 +119,203 @@ class FhirDiagnosticReportService extends FhirServiceBase implements IPatientCom
             'http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note'
             ,'http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab'
         ];
+    }
+
+    /**
+     * Parses an OpenEMR data record, returning the equivalent FHIR Resource
+     * This method delegates to the appropriate sub-service
+     */
+    public function parseOpenEMRRecord($dataRecord = array(), $encode = false)
+    {
+        // Try to determine which service to use based on the data record
+        if (!empty($dataRecord['category_code']) || !empty($dataRecord['code'])) {
+            $code = $dataRecord['code'] ?? '';
+            foreach ($this->getMappedServices() as $service) {
+                if ($service->supportsCode($code)) {
+                    return $service->parseOpenEMRRecord($dataRecord, $encode);
+                }
+            }
+        }
+        
+        // Default to first service (clinical notes)
+        $services = $this->getMappedServices();
+        if (!empty($services)) {
+            return $services[0]->parseOpenEMRRecord($dataRecord, $encode);
+        }
+        
+        return null;
+    }
+
+    /**
+     * Parses a FHIR Resource, returning the equivalent OpenEMR record.
+     * This method delegates to the appropriate sub-service
+     */
+    public function parseFhirResource(FHIRDomainResource $fhirResource)
+    {
+        if (!($fhirResource instanceof FHIRDiagnosticReport)) {
+            throw new \InvalidArgumentException("Resource must be of type FHIRDiagnosticReport");
+        }
+
+        // Try code-based routing
+        $codeableConcept = $fhirResource->getCode();
+        if (!empty($codeableConcept) && is_object($codeableConcept) && method_exists($codeableConcept, 'getCoding')) {
+            $codings = $codeableConcept->getCoding();
+            if (!empty($codings) && is_array($codings)) {
+                foreach ($codings as $coding) {
+                    if (is_object($coding) && method_exists($coding, 'getCode')) {
+                        $codeObj = $coding->getCode();
+                        $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)$codeObj;
+                        
+                        foreach ($this->getMappedServices() as $service) {
+                            if ($service->supportsCode($code)) {
+                                return $service->parseFhirResource($fhirResource);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default to first service
+        $services = $this->getMappedServices();
+        if (!empty($services)) {
+            return $services[0]->parseFhirResource($fhirResource);
+        }
+
+        return [];
+    }
+
+    /**
+     * Inserts an OpenEMR record into the system.
+     * This method should not be called directly - use insert() instead
+     */
+    protected function insertOpenEMRRecord($openEmrRecord)
+    {
+        $processingResult = new ProcessingResult();
+        $processingResult->addInternalError("insertOpenEMRRecord should not be called directly on FhirDiagnosticReportService. Use insert() instead.");
+        return $processingResult;
+    }
+
+    /**
+     * Searches for OpenEMR records using OpenEMR search parameters
+     */
+    protected function searchForOpenEMRRecords($openEMRSearchParameters): ProcessingResult
+    {
+        $processingResult = new ProcessingResult();
+        $processingResult->setInternalErrors(['searchForOpenEMRRecords not implemented - use getAll() instead']);
+        return $processingResult;
+    }
+
+    /**
+     * Creates the Provenance resource for the equivalent FHIR Resource
+     */
+    public function createProvenanceResource($dataRecord, $encode = false)
+    {
+        // Delegate to the appropriate sub-service
+        if ($dataRecord instanceof FHIRDiagnosticReport) {
+            foreach ($this->getMappedServices() as $service) {
+                $result = $service->createProvenanceResource($dataRecord, $encode);
+                if ($result) {
+                    return $result;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Updates an OpenEMR record.
+     */
+    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord)
+    {
+        $processingResult = new ProcessingResult();
+        $processingResult->addInternalError("Update not yet implemented for DiagnosticReport");
+        return $processingResult;
+    }
+
+    /**
+     * Inserts a FHIR DiagnosticReport resource into the system.
+     * Routes to the appropriate sub-service based on the category or code.
+     * 
+     * @param FHIRDomainResource $fhirResource The FHIR DiagnosticReport resource
+     * @return ProcessingResult The OpenEMR Service Result
+     */
+    public function insert(FHIRDomainResource $fhirResource): ProcessingResult
+    {
+        if (!($fhirResource instanceof FHIRDiagnosticReport)) {
+            throw new \InvalidArgumentException("Resource must be of type FHIRDiagnosticReport");
+        }
+
+        $processingResult = new ProcessingResult();
+
+        try {
+            // Try to determine which service to use based on category
+            $categories = $fhirResource->getCategory();
+            if (!empty($categories) && is_array($categories)) {
+                foreach ($categories as $category) {
+                    if (is_object($category) && method_exists($category, 'getCoding')) {
+                        $codings = $category->getCoding();
+                        if (!empty($codings) && is_array($codings)) {
+                            foreach ($codings as $coding) {
+                                if (is_object($coding) && method_exists($coding, 'getCode')) {
+                                    $codeObj = $coding->getCode();
+                                    $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)$codeObj;
+                                    
+                                    // Try each service to see if it supports this category
+                                    foreach ($this->getMappedServices() as $service) {
+                                        if ($service->supportsCategory($code)) {
+                                            return $service->insert($fhirResource);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If category didn't match, try code
+            $codeableConcept = $fhirResource->getCode();
+            if (!empty($codeableConcept)) {
+                if (is_object($codeableConcept) && method_exists($codeableConcept, 'getCoding')) {
+                    $codings = $codeableConcept->getCoding();
+                    if (!empty($codings) && is_array($codings)) {
+                        foreach ($codings as $coding) {
+                            if (is_object($coding) && method_exists($coding, 'getCode')) {
+                                $codeObj = $coding->getCode();
+                                $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)$codeObj;
+                                
+                                // Try each service to see if it supports this code
+                                foreach ($this->getMappedServices() as $service) {
+                                    if ($service->supportsCode($code)) {
+                                        return $service->insert($fhirResource);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Default to clinical notes service if no specific match found
+            $services = $this->getMappedServices();
+            
+            foreach ($services as $service) {
+                if ($service instanceof FhirDiagnosticReportClinicalNotesService) {
+                    return $service->insert($fhirResource);
+                }
+            }
+
+            // If we get here, something went wrong
+            $processingResult->addInternalError("No suitable service found for DiagnosticReport");
+        } catch (\Exception $e) {
+            (new SystemLogger())->error("FhirDiagnosticReportService->insert() exception thrown", [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $processingResult->addInternalError("Error inserting DiagnosticReport: " . $e->getMessage());
+        }
+
+        return $processingResult;
     }
 }
