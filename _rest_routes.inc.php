@@ -8886,6 +8886,59 @@ RestConfig::$FHIR_ROUTE_MAP = array(
     },
 
     /**
+     *  @OA\Post(
+     *      path="/fhir/DiagnosticReport",
+     *      description="Creates a new DiagnosticReport resource.",
+     *      tags={"fhir"},
+     *      @OA\RequestBody(
+     *          required=true,
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  description="FHIR DiagnosticReport resource",
+     *                  type="object"
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="201",
+     *          description="Standard Response",
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  @OA\Property(
+     *                      property="json object",
+     *                      description="FHIR Json object.",
+     *                      type="object"
+     *                  )
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="400",
+     *          ref="#/components/responses/badrequest"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "POST /fhir/DiagnosticReport" => function (HttpRestRequest $request) {
+        if ($request->isPatientRequest()) {
+            // Patient context - not allowed to create diagnostic reports directly
+            RestConfig::authorization_check("patients", "med");
+        } else {
+            RestConfig::authorization_check("admin", "super");
+        }
+        $data = (array) (json_decode(file_get_contents("php://input"), true) ?? []);
+        $return = (new FhirDiagnosticReportRestController())->post($data);
+        RestConfig::apiLog($return);
+        return $return;
+    },
+
+    /**
      *  @OA\Get(
      *      path="/fhir/DiagnosticReport",
      *      description="Returns a list of DiagnosticReport resources.",
@@ -10444,6 +10497,57 @@ RestConfig::$FHIR_ROUTE_MAP = array(
     },
 
     /**
+     *  @OA\Post(
+     *      path="/fhir/Medication",
+     *      description="Creates a new FHIR Medication resource.",
+     *      tags={"fhir"},
+     *      @OA\RequestBody(
+     *          required=true,
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  description="The json object for the Medication resource.",
+     *                  type="object"
+     *              ),
+     *              example={
+     *                  "resourceType": "Medication",
+     *                  "status": "active",
+     *                  "code": {
+     *                      "coding": {
+     *                          {
+     *                              "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+     *                              "code": "1049502",
+     *                              "display": "Amoxicillin 250 MG Oral Capsule"
+     *                          }
+     *                      },
+     *                      "text": "Amoxicillin 250 MG Oral Capsule"
+     *                  }
+     *              }
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="201",
+     *          description="Created"
+     *      ),
+     *      @OA\Response(
+     *          response="400",
+     *          ref="#/components/responses/badrequest"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "POST /fhir/Medication" => function (HttpRestRequest $request) {
+        RestConfig::authorization_check("admin", "super");
+        $return = (new FhirMedicationRestController())->post($request->getBody());
+        RestConfig::apiLog($return);
+        return $return;
+    },
+
+    /**
      *  @OA\Get(
      *      path="/fhir/MedicationRequest",
      *      description="Returns a list of MedicationRequest resources.",
@@ -10636,6 +10740,109 @@ RestConfig::$FHIR_ROUTE_MAP = array(
             RestConfig::authorization_check("patients", "med");
             $return = (new FhirMedicationRequestRestController())->getOne($uuid);
         }
+        RestConfig::apiLog($return);
+        return $return;
+    },
+
+    /**
+     *  @OA\Post(
+     *      path="/fhir/MedicationRequest",
+     *      description="Creates a new FHIR MedicationRequest resource",
+     *      tags={"fhir"},
+     *      @OA\RequestBody(
+     *          required=true,
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  description="The FHIR MedicationRequest resource",
+     *                  type="object",
+     *                  required={"resourceType", "status", "intent", "subject", "medicationCodeableConcept"},
+     *                  @OA\Property(
+     *                      property="resourceType",
+     *                      description="Resource type must be 'MedicationRequest'",
+     *                      type="string",
+     *                      default="MedicationRequest"
+     *                  ),
+     *                  @OA\Property(
+     *                      property="status",
+     *                      description="Status of the medication request (active | completed | stopped)",
+     *                      type="string",
+     *                      default="active"
+     *                  ),
+     *                  @OA\Property(
+     *                      property="intent",
+     *                      description="Intent of the medication request (order | plan)",
+     *                      type="string",
+     *                      default="order"
+     *                  ),
+     *                  @OA\Property(
+     *                      property="subject",
+     *                      description="Reference to the patient",
+     *                      type="object",
+     *                      @OA\Property(property="reference", type="string", example="Patient/a09ac6d6-2d59-43d4-84c8-c800719d3624")
+     *                  ),
+     *                  @OA\Property(
+     *                      property="medicationCodeableConcept",
+     *                      description="Medication being requested",
+     *                      type="object"
+     *                  ),
+     *                  example={
+     *                      "resourceType": "MedicationRequest",
+     *                      "status": "active",
+     *                      "intent": "order",
+     *                      "subject": {
+     *                          "reference": "Patient/a09ac6d6-2d59-43d4-84c8-c800719d3624"
+     *                      },
+     *                      "medicationCodeableConcept": {
+     *                          "coding": {
+     *                              {
+     *                                  "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+     *                                  "code": "1049221",
+     *                                  "display": "Acetaminophen 325 MG Oral Tablet"
+     *                              }
+     *                          },
+     *                          "text": "Acetaminophen 325mg tablet"
+     *                      },
+     *                      "authoredOn": "2024-12-16T10:00:00Z",
+     *                      "dosageInstruction": {
+     *                          {
+     *                              "text": "Take 1-2 tablets by mouth every 4-6 hours as needed for pain"
+     *                          }
+     *                      }
+     *                  }
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="201",
+     *          description="Created - MedicationRequest resource created successfully",
+     *          @OA\JsonContent(
+     *              @OA\Property(property="resourceType", description="MedicationRequest", type="string"),
+     *              @OA\Property(property="id", description="UUID of the created resource", type="string")
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="400",
+     *          description="Bad Request - Invalid MedicationRequest resource",
+     *          ref="#/components/responses/badrequest"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          description="Unauthorized",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "POST /fhir/MedicationRequest" => function (HttpRestRequest $request) {
+        if ($request->isPatientRequest()) {
+            // Patient context - requires special authorization
+            RestConfig::authorization_check("patients", "med");
+        } else {
+            RestConfig::authorization_check("admin", "super");
+        }
+        $data = (array) (json_decode(file_get_contents("php://input"), true) ?? []);
+        $return = (new FhirMedicationRequestRestController())->post($data);
         RestConfig::apiLog($return);
         return $return;
     },
@@ -13435,6 +13642,45 @@ RestConfig::$FHIR_ROUTE_MAP = array(
         $fhirQuestionnaireService = new FhirQuestionnaireResponseService();
         $fhirQuestionnaireService->addMappedService(new FhirQuestionnaireResponseFormService());
         $return = (new FhirQuestionnaireResponseRestController($fhirQuestionnaireService))->list($request);
+        RestConfig::apiLog($return);
+        return $return;
+    },
+
+    /**
+     *  @OA\Post(
+     *      path="/fhir/QuestionnaireResponse",
+     *      summary="Creates a new FHIR QuestionnaireResponse resource",
+     *      tags={"fhir"},
+     *      @OA\RequestBody(
+     *          required=true,
+     *          @OA\MediaType(
+     *              mediaType="application/json",
+     *              @OA\Schema(
+     *                  description="FHIR QuestionnaireResponse resource",
+     *                  type="object"
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response="201",
+     *          description="Created"
+     *      ),
+     *      @OA\Response(
+     *          response="400",
+     *          ref="#/components/responses/badrequest"
+     *      ),
+     *      @OA\Response(
+     *          response="401",
+     *          ref="#/components/responses/unauthorized"
+     *      ),
+     *      security={{"openemr_auth":{}}}
+     *  )
+     */
+    "POST /fhir/QuestionnaireResponse" => function (HttpRestRequest $request) {
+        RestConfig::authorization_check("admin", "super");
+        $fhirQuestionnaireService = new FhirQuestionnaireResponseService();
+        $fhirQuestionnaireService->addMappedService(new FhirQuestionnaireResponseFormService());
+        $return = (new FhirQuestionnaireResponseRestController($fhirQuestionnaireService))->post($request->getBody());
         RestConfig::apiLog($return);
         return $return;
     },

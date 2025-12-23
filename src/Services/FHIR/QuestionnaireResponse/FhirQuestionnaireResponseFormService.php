@@ -49,10 +49,6 @@ use Exception;
 
 class FhirQuestionnaireResponseFormService extends FhirServiceBase implements IResourceReadableService, IResourceSearchableService, IResourceCreatableService
 {
-    /**
-     * If you'd prefer to keep out the empty methods that are doing nothing uncomment the following helper trait
-     */
-    use FhirServiceBaseEmptyTrait;
     use PatientSearchTrait;
 
     /**
@@ -87,7 +83,9 @@ class FhirQuestionnaireResponseFormService extends FhirServiceBase implements IR
             if ($parsedUrl['localResource']) {
                 $parsedResource['questionnaire_id'] = $parsedUrl['uuid'];
             } else {
-                throw new InvalidArgumentException("Questionnaire does not exist on local server. Cannot save QuestionnaireResponse.");
+                // Allow external questionnaire references
+                // Store the canonical URL as the questionnaire_id
+                $parsedResource['questionnaire_id'] = $fhirResource->getQuestionnaire();
             }
         }
         // our subjects at this point should really only be the patient...
@@ -354,13 +352,33 @@ class FhirQuestionnaireResponseFormService extends FhirServiceBase implements IR
         // operation so we ignore any record ids here.
         $qr_id = null;
         $qr_record_id = null; // what is this even used for?
-        $questionnaireService = new QuestionnaireService();
-        $tokenSearchValue = new TokenSearchField('uuid', [$openEmrRecord['questionnaire_id']], true);
-        $questionnaireRecords = ProcessingResult::extractDataArray($questionnaireService->search(['uuid' => $tokenSearchValue]));
-        if (empty($questionnaireRecords)) {
-            throw new InvalidArgumentException("Questionnaire does not exist");
+        
+        // Try to find local questionnaire, or use external reference
+        $questionnaire = null;
+        $questionnaireId = $openEmrRecord['questionnaire_id'];
+        
+        // Check if it's a UUID (local) or URL (external)
+        if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $questionnaireId)) {
+            // It's a UUID, search for local questionnaire
+            $questionnaireService = new QuestionnaireService();
+            $tokenSearchValue = new TokenSearchField('uuid', [$questionnaireId], true);
+            $questionnaireRecords = ProcessingResult::extractDataArray($questionnaireService->search(['uuid' => $tokenSearchValue]));
+            if (!empty($questionnaireRecords)) {
+                $questionnaire = $questionnaireRecords[0];
+            }
         }
-        $questionnaire = $questionnaireRecords[0];
+        
+        // If no local questionnaire found, create a minimal one for external reference
+        if (empty($questionnaire)) {
+            $questionnaire = [
+                'questionnaire' => json_encode([
+                    'resourceType' => 'Questionnaire',
+                    'id' => 'external',
+                    'url' => $questionnaireId,
+                    'status' => 'active'
+                ])
+            ];
+        }
 
         $form_response = null; // not sure why we are saving this off...
 
@@ -376,9 +394,47 @@ class FhirQuestionnaireResponseFormService extends FhirServiceBase implements IR
                 $form_response,
                 true // I think we want to always generate a narrative here.
             );
-            // return the newly created resource id
+            
+            // Fetch the newly created resource and convert to FHIR format
             $processingResult = new ProcessingResult();
-            $processingResult->addData($saved['response_id']);
+            if (!empty($saved['response_id'])) {
+                // Get the OpenEMR record using the response_id (UUID)
+                $openEMRRecord = $this->service->fetchQuestionnaireResponseById(
+                    $saved['id'] ?? null,
+                    $saved['response_id'],
+                    null
+                );
+                
+                if (!empty($openEMRRecord)) {
+                    // The fetchQuestionnaireResponseById doesn't include JOIN data like puuid
+                    // Add the patient UUID and encounter UUID from our original input
+                    $openEMRRecord['puuid'] = $openEmrRecord['puuid'] ?? null;
+                    $openEMRRecord['encounter_uuid'] = $openEmrRecord['encounter_uuid'] ?? null;
+                    
+                    // Ensure the questionnaire_response_uuid is set
+                    if (empty($openEMRRecord['questionnaire_response_uuid']) && !empty($openEMRRecord['uuid'])) {
+                        $openEMRRecord['questionnaire_response_uuid'] = $openEMRRecord['uuid'];
+                    }
+                    
+                    // Ensure UUID is in string format (not binary)
+                    if (!empty($openEMRRecord['questionnaire_response_uuid']) && !is_string($openEMRRecord['questionnaire_response_uuid'])) {
+                        $openEMRRecord['questionnaire_response_uuid'] = UuidRegistry::uuidToString($openEMRRecord['questionnaire_response_uuid']);
+                    }
+                    if (!empty($openEMRRecord['uuid']) && !is_string($openEMRRecord['uuid'])) {
+                        $openEMRRecord['uuid'] = UuidRegistry::uuidToString($openEMRRecord['uuid']);
+                    }
+                    
+                    // Convert to FHIR resource
+                    $fhirResource = $this->parseOpenEMRRecord($openEMRRecord);
+                    $processingResult->addData($fhirResource);
+                } else {
+                    // Fallback: return the UUID if we can't fetch the record
+                    $processingResult->addData($saved['response_id']);
+                }
+            } else {
+                $processingResult->setInternalErrors("Failed to save QuestionnaireResponse");
+            }
+            
             return $processingResult;
         } catch (Exception $exception) {
             (new SystemLogger())->errorLogCaller($exception->getMessage(), ['trace' => $exception->getTraceAsString()]);
@@ -386,5 +442,18 @@ class FhirQuestionnaireResponseFormService extends FhirServiceBase implements IR
             $processingResult->setInternalErrors("Server Error in creating QuestionnaireResponse resource");
             return $processingResult;
         }
+    }
+
+    /**
+     * Updates an OpenEMR record.
+     * @param string $fhirResourceId The FHIR resource ID (UUID)
+     * @param array $updatedOpenEMRRecord The updated OpenEMR record
+     * @return ProcessingResult
+     */
+    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord): ProcessingResult
+    {
+        $processingResult = new ProcessingResult();
+        $processingResult->addInternalError("Update not yet implemented for QuestionnaireResponse");
+        return $processingResult;
     }
 }

@@ -63,10 +63,11 @@ class OpenEMRFhirQuestionnaireResponse extends FHIRQuestionnaireResponse
     public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
-        if (isset($this->questionnaire)) {
-            if (0 < count($this->questionnaire->getExtension())) {
+        if (isset($this->questionnaire) && is_object($this->questionnaire) && method_exists($this->questionnaire, 'getExtension')) {
+            $extensions = $this->questionnaire->getExtension();
+            if (is_array($extensions) && 0 < count($extensions)) {
                 $json['_questionnaire'] = [
-                    'extension' => $this->questionnaire->getExtension()
+                    'extension' => $extensions
                 ];
             }
         }
@@ -80,9 +81,12 @@ class OpenEMRFhirQuestionnaireResponse extends FHIRQuestionnaireResponse
             $sxe = new SimpleXMLElement('<QuestionnaireResponse xmlns="http://hl7.org/fhir"></QuestionnaireResponse>');
         }
         parent::xmlSerialize(true, $sxe);
-        if (isset($this->questionnaire) && 0 < count($this->questionnaire->getExtension())) {
-            foreach ($this->questionnaire->getExtension() as $questionnaireExtension) {
-                $questionnaireExtension->xmlSerialize(true, $sxe->addChild('_questionnaire'));
+        if (isset($this->questionnaire) && is_object($this->questionnaire) && method_exists($this->questionnaire, 'getExtension')) {
+            $extensions = $this->questionnaire->getExtension();
+            if (is_array($extensions) && 0 < count($extensions)) {
+                foreach ($extensions as $questionnaireExtension) {
+                    $questionnaireExtension->xmlSerialize(true, $sxe->addChild('_questionnaire'));
+                }
             }
         }
 
