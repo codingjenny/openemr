@@ -234,8 +234,85 @@ class ImmunizationService extends BaseService
      */
     public function insert($data)
     {
-        $processingResult = new ProcessingResult();
-        $processingResult->addInternalError("Method not implemented yet.");
+        $processingResult = $this->immunizationValidator->validate(
+            $data,
+            ImmunizationValidator::DATABASE_INSERT_CONTEXT
+        );
+
+        if (!$processingResult->isValid()) {
+            return $processingResult;
+        }
+
+        // Convert patient UUID to patient_id
+        if (!empty($data['puuid'])) {
+            $patientUuidBytes = UuidRegistry::uuidToBytes($data['puuid']);
+            $patientResult = QueryUtils::fetchRecords(
+                "SELECT pid FROM patient_data WHERE uuid = ?",
+                [$patientUuidBytes]
+            );
+            if (empty($patientResult)) {
+                $validationMessages = $processingResult->getValidationMessages();
+                $validationMessages['patient'] = 'Patient not found';
+                $processingResult->setValidationMessages($validationMessages);
+                return $processingResult;
+            }
+            $data['patient_id'] = $patientResult[0]['pid'];
+            unset($data['puuid']);
+        }
+
+        // Convert provider UUID to administered_by_id if provided
+        if (!empty($data['provider_uuid'])) {
+            $providerUuidBytes = UuidRegistry::uuidToBytes($data['provider_uuid']);
+            $providerResult = QueryUtils::fetchRecords(
+                "SELECT id FROM users WHERE uuid = ? AND npi IS NOT NULL AND npi != ''",
+                [$providerUuidBytes]
+            );
+            if (!empty($providerResult)) {
+                $data['administered_by_id'] = $providerResult[0]['id'];
+            }
+            unset($data['provider_uuid']);
+        }
+
+        // Set default values
+        $createdBy = $_SESSION['authUserID'] ?? null;
+        $data['created_by'] = $createdBy;
+        $data['updated_by'] = $createdBy;
+        
+        if (empty($data['create_date'])) {
+            $data['create_date'] = date('Y-m-d H:i:s');
+        }
+        
+        if (empty($data['information_source'])) {
+            $data['information_source'] = 'new_immunization_record';
+        }
+
+        // Create UUID
+        $data['uuid'] = (new UuidRegistry(['table_name' => self::IMMUNIZATION_TABLE]))->createUuid();
+
+        // Build insert query
+        $query = $this->buildInsertColumns($data);
+        if (empty($query) || !isset($query['set']) || !isset($query['bind'])) {
+            $processingResult->addInternalError("Failed to build insert query");
+            return $processingResult;
+        }
+        
+        $sql = "INSERT INTO " . self::IMMUNIZATION_TABLE . " SET ";
+        $sql .= $query['set'];
+
+        $results = sqlInsert(
+            $sql,
+            $query['bind']
+        );
+
+        if ($results) {
+            $processingResult->addData(array(
+                'id' => $results,
+                'uuid' => UuidRegistry::uuidToString($data['uuid'])
+            ));
+        } else {
+            $processingResult->addInternalError("error processing SQL Insert");
+        }
+
         return $processingResult;
     }
 

@@ -20,6 +20,7 @@ use OpenEMR\Services\Search\TokenSearchValue;
 use OpenEMR\Validators\ProcessingResult;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
 use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Common\Database\QueryUtils;
 use InvalidArgumentException;
 
 /**
@@ -129,7 +130,7 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
             $form->addCoding($formCoding);
         }
 
-        if (isset($dataRecord['expiration']) || isset($dataRecord['expiration'])) {
+        if (isset($dataRecord['expiration']) || isset($dataRecord['lot_number'])) {
             $batch = new FHIRMedicationBatch();
             if (isset($dataRecord['expiration'])) {
                 $expirationDate = new FHIRDateTime();
@@ -190,33 +191,50 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
         $parsedResource = [];
 
         // code - contains medication codes (e.g., RxNorm)
-        if (!empty($fhirResource->getCode())) {
-            $code = $fhirResource->getCode();
+        $codeObj = $fhirResource->getCode();
+        
+        if (!empty($codeObj)) {
+            $code = $codeObj;
             $codings = $code->getCoding();
+            
             if (!empty($codings)) {
                 foreach ($codings as $coding) {
-                    $system = $coding->getSystem();
-                    $codeValue = $coding->getCode();
+                    $systemObj = method_exists($coding, 'getSystem') ? $coding->getSystem() : null;
+                    $system = is_object($systemObj) && method_exists($systemObj, 'getValue') ? $systemObj->getValue() : (string)($systemObj ?? '');
+                    $codeObj = method_exists($coding, 'getCode') ? $coding->getCode() : null;
+                    $codeValue = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)($codeObj ?? '');
                     
-                    // Check for RxNorm codes
-                    if (strpos($system, 'rxnorm') !== false && !empty($codeValue)) {
-                        $parsedResource['drug_code'] = $codeValue;
+                    // Check for RxNorm codes - store as string (database field is VARCHAR)
+                    // DrugService::createResultRecordFromDatabaseResult will convert it to array format
+                    if (strpos(strtolower($system), 'rxnorm') !== false && !empty($codeValue)) {
+                        $parsedResource['drug_code'] = $codeValue; // Store as string
                         break;
                     }
                 }
             }
             
             // Get medication name from text or display
-            if (!empty($code->getText())) {
-                $parsedResource['name'] = $code->getText();
-            } elseif (!empty($codings) && !empty($codings[0]->getDisplay())) {
-                $parsedResource['name'] = $codings[0]->getDisplay();
+            $textObj = method_exists($code, 'getText') ? $code->getText() : null;
+            $text = is_object($textObj) && method_exists($textObj, 'getValue') ? $textObj->getValue() : (string)($textObj ?? '');
+            
+            if (!empty($text)) {
+                $parsedResource['name'] = $text;
+            } elseif (!empty($codings)) {
+                $firstCoding = is_array($codings) ? ($codings[0] ?? null) : $codings;
+                if (!empty($firstCoding)) {
+                    $displayObj = method_exists($firstCoding, 'getDisplay') ? $firstCoding->getDisplay() : null;
+                    $display = is_object($displayObj) && method_exists($displayObj, 'getValue') ? $displayObj->getValue() : (string)($displayObj ?? '');
+                    if (!empty($display)) {
+                        $parsedResource['name'] = $display;
+                    }
+                }
             }
         }
 
         // status - active/inactive
         if (!empty($fhirResource->getStatus())) {
-            $status = $fhirResource->getStatus();
+            $statusObj = $fhirResource->getStatus();
+            $status = is_object($statusObj) && method_exists($statusObj, 'getValue') ? $statusObj->getValue() : (string)($statusObj ?? '');
             $parsedResource['active'] = ($status === 'active') ? 1 : 0;
         } else {
             $parsedResource['active'] = 1; // default to active
@@ -226,12 +244,16 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
         if (!empty($fhirResource->getForm())) {
             $form = $fhirResource->getForm();
             // Try to extract form code or text
-            if (!empty($form->getText())) {
-                $parsedResource['form'] = $form->getText();
+            $textObj = method_exists($form, 'getText') ? $form->getText() : null;
+            $text = is_object($textObj) && method_exists($textObj, 'getValue') ? $textObj->getValue() : (string)($textObj ?? '');
+            if (!empty($text)) {
+                $parsedResource['form'] = $text;
             } elseif (!empty($form->getCoding()) && !empty($form->getCoding()[0])) {
                 $formCoding = $form->getCoding()[0];
-                if (!empty($formCoding->getDisplay())) {
-                    $parsedResource['form'] = $formCoding->getDisplay();
+                $displayObj = method_exists($formCoding, 'getDisplay') ? $formCoding->getDisplay() : null;
+                $display = is_object($displayObj) && method_exists($displayObj, 'getValue') ? $displayObj->getValue() : (string)($displayObj ?? '');
+                if (!empty($display)) {
+                    $parsedResource['form'] = $display;
                 }
             }
         }
@@ -249,10 +271,9 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
 
         // Ensure we have at least a name
         if (empty($parsedResource['name'])) {
-            throw new InvalidArgumentException("Medication name is required");
+            throw new InvalidArgumentException("Medication name is required. Please provide code.text or code.coding[].display");
         }
 
-        error_log("FhirMedicationService::parseFhirResource - END: " . json_encode($parsedResource));
         return $parsedResource;
     }
 
@@ -262,40 +283,44 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
      * @param array $openEmrRecord The OpenEMR drug record
      * @return ProcessingResult
      */
-    public function insertOpenEMRRecord($openEmrRecord): ProcessingResult
+    protected function insertOpenEMRRecord($openEmrRecord): ProcessingResult
     {
-        error_log("FhirMedicationService::insertOpenEMRRecord - START: " . json_encode($openEmrRecord));
         $processingResult = new ProcessingResult();
 
         try {
             // Validate required fields
             if (empty($openEmrRecord['name'])) {
-                error_log("FhirMedicationService::insertOpenEMRRecord - VALIDATION ERROR: name is required");
-                $processingResult->addValidationError('name', 'Medication name is required');
+                $validationMessages = $processingResult->getValidationMessages();
+                $validationMessages['name'] = 'Medication name is required';
+                $processingResult->setValidationMessages($validationMessages);
                 return $processingResult;
             }
 
             // Generate UUID
             $uuid = UuidRegistry::getRegistryForTable('drugs')->createUuid();
-            $uuidString = UuidRegistry::uuidToString($uuid);
 
-            // Prepare data for insertion
+            // Prepare data for insertion - ensure all values are strings/primitives, not FHIR objects
             $drugData = [
                 'uuid' => $uuid,
-                'name' => $openEmrRecord['name'],
-                'active' => $openEmrRecord['active'] ?? 1,
+                'name' => is_object($openEmrRecord['name']) && method_exists($openEmrRecord['name'], 'getValue') 
+                    ? $openEmrRecord['name']->getValue() 
+                    : (string)($openEmrRecord['name'] ?? ''),
+                'active' => (int)($openEmrRecord['active'] ?? 1),
             ];
 
-            // Optional fields
+            // Optional fields - convert objects to strings
             if (!empty($openEmrRecord['drug_code'])) {
-                $drugData['drug_code'] = $openEmrRecord['drug_code'];
+                $drugData['drug_code'] = is_object($openEmrRecord['drug_code']) && method_exists($openEmrRecord['drug_code'], 'getValue')
+                    ? $openEmrRecord['drug_code']->getValue()
+                    : (string)($openEmrRecord['drug_code']);
             }
             if (!empty($openEmrRecord['form'])) {
-                $drugData['form'] = $openEmrRecord['form'];
+                $drugData['form'] = is_object($openEmrRecord['form']) && method_exists($openEmrRecord['form'], 'getValue')
+                    ? $openEmrRecord['form']->getValue()
+                    : (string)($openEmrRecord['form']);
             }
-            if (isset($openEmrRecord['ndc_number'])) {
-                $drugData['ndc_number'] = $openEmrRecord['ndc_number'];
-            }
+            // ndc_number is required by database (NOT NULL), so set default if not provided
+            $drugData['ndc_number'] = (string)($openEmrRecord['ndc_number'] ?? '');
             if (isset($openEmrRecord['lot_number'])) {
                 // Note: lot_number is not in the drugs table schema
                 // You may need to handle this differently
@@ -311,52 +336,95 @@ class FhirMedicationService extends FhirServiceBase implements IResourceUSCIGPro
             foreach ($drugData as $field => $value) {
                 if ($field !== 'uuid') {
                     $fields[] = "`$field` = ?";
-                    $binds[] = $value;
+                    // Ensure value is a primitive type (string, int, etc.), not an object
+                    $binds[] = is_object($value) ? (string)$value : $value;
                 } else {
                     $fields[] = "`$field` = ?";
-                    $binds[] = UuidRegistry::uuidToBytes($value);
+                    // $value is already a UUID object from createUuid(), convert to string first, then to bytes
+                    $uuidString = UuidRegistry::uuidToString($value);
+                    $binds[] = UuidRegistry::uuidToBytes($uuidString);
                 }
             }
 
             $sql = "INSERT INTO drugs SET " . implode(', ', $fields);
-            error_log("FhirMedicationService::insertOpenEMRRecord - SQL: " . $sql);
-            error_log("FhirMedicationService::insertOpenEMRRecord - BINDS: " . json_encode($binds));
+            
+            try {
             $result = sqlInsert($sql, $binds);
-            error_log("FhirMedicationService::insertOpenEMRRecord - INSERT RESULT: " . ($result ? "SUCCESS (ID: $result)" : "FAILED"));
+            } catch (\Exception $insertException) {
+                $processingResult->addInternalError("Failed to insert medication: " . $insertException->getMessage());
+                return $processingResult;
+            }
 
-            if ($result) {
-                // Fetch the complete record using search - EXACTLY like DiagnosticReport does
-                $search = [
-                    'uuid' => new TokenSearchField('uuid', new TokenSearchValue($uuidString, false))
-                ];
-                error_log("FhirMedicationService::insertOpenEMRRecord - Searching for UUID: " . $uuidString);
-                $searchResult = $this->medicationService->search($search);
-                error_log("FhirMedicationService::insertOpenEMRRecord - Search hasData: " . ($searchResult->hasData() ? 'true' : 'false') . ", count: " . count($searchResult->getData()));
-
-                if ($searchResult->hasData() && count($searchResult->getData()) > 0) {
-                    $drug = $searchResult->getData()[0];
-                    error_log("FhirMedicationService::insertOpenEMRRecord - Found drug: " . json_encode($drug));
+            if ($result && $result > 0) {
+                // Query directly by drug_id (more reliable than getOne with UUID)
+                // This avoids issues with UUID conversion and complex queries
+                try {
+                    $querySql = "SELECT drug_id, uuid, name, name AS drug, ndc_number, form, size, unit, route, related_code, active, drug_code, 
+                                 last_updated AS drug_last_updated, date_created AS drug_date_created 
+                                 FROM drugs WHERE drug_id = ?";
+                    $queryResult = QueryUtils::fetchRecords($querySql, [$result]);
                     
-                    // Convert to FHIR resource
-                    $fhirResource = $this->parseOpenEMRRecord($drug, false);
-                    error_log("FhirMedicationService::insertOpenEMRRecord - FHIR resource created, ID: " . ($fhirResource->getId() ? $fhirResource->getId()->getValue() : 'NULL'));
-                    $processingResult->setData([]);
-                    $processingResult->addData($fhirResource);
-                } else {
-                    error_log("FhirMedicationService::insertOpenEMRRecord - ERROR: Failed to retrieve inserted medication record");
-                    $processingResult->addInternalError("Failed to retrieve inserted medication record");
+                    if (!empty($queryResult)) {
+                        $drugRow = $queryResult[0];
+                        
+                        // Convert UUID from binary to string
+                        if (isset($drugRow['uuid'])) {
+                            $drugRow['uuid'] = UuidRegistry::uuidToString($drugRow['uuid']);
+                        }
+                        // Set default values for missing fields
+                        $drugRow['active'] = $drugRow['active'] ?? 1;
+                        // rxnorm_drugcode is needed by createResultRecordFromDatabaseResult
+                        $drugRow['rxnorm_drugcode'] = $drugRow['drug_code'] ?? '';
+                        
+                        // Format drug_code using reflection to call DrugService::addCoding
+                        if (!empty($drugRow['drug_code']) && is_string($drugRow['drug_code'])) {
+                            try {
+                                $reflection = new \ReflectionClass($this->medicationService);
+                                $addCodingMethod = $reflection->getMethod('addCoding');
+                                $addCodingMethod->setAccessible(true);
+                                $drugCodeStr = $drugRow['drug_code'];
+                                if (strpos($drugCodeStr, ':') === false && strpos($drugCodeStr, 'RXCUI') === false) {
+                                    $drugRow['drug_code'] = $addCodingMethod->invoke($this->medicationService, "RXCUI:" . $drugCodeStr);
+                                } else {
+                                    $drugRow['drug_code'] = $addCodingMethod->invoke($this->medicationService, $drugCodeStr);
+                                }
+                            } catch (\ReflectionException $reflectionException) {
+                                $drugRow['drug_code'] = [];
+                            }
+                        } else {
+                            $drugRow['drug_code'] = [];
+                        }
+                        
+                        // Use createResultRecordFromDatabaseResult via reflection to get properly formatted record
+                        try {
+                            $reflection = new \ReflectionClass($this->medicationService);
+                            $createMethod = $reflection->getMethod('createResultRecordFromDatabaseResult');
+                            $createMethod->setAccessible(true);
+                            $formattedDrug = $createMethod->invoke($this->medicationService, $drugRow);
+                        } catch (\ReflectionException $reflectionException) {
+                            $formattedDrug = $drugRow;
+                        }
+                        
+                        // Convert to FHIR resource
+                        try {
+                            $fhirResource = $this->parseOpenEMRRecord($formattedDrug, false);
+                            $processingResult->setData([$fhirResource]);
+                        } catch (\Exception $parseException) {
+                            $processingResult->addInternalError("Failed to parse medication record: " . $parseException->getMessage());
+                        }
+                    } else {
+                        $processingResult->addInternalError("Failed to retrieve inserted medication record");
+                    }
+                } catch (\Exception $queryException) {
+                    $processingResult->addInternalError("Failed to retrieve inserted medication record: " . $queryException->getMessage());
                 }
             } else {
-                error_log("FhirMedicationService::insertOpenEMRRecord - ERROR: Failed to insert medication");
-                $processingResult->setInternalErrors("Failed to insert medication");
+                $processingResult->addInternalError("Failed to insert medication");
             }
         } catch (\Exception $exception) {
-            error_log("FhirMedicationService::insertOpenEMRRecord - EXCEPTION: " . $exception->getMessage());
-            error_log("FhirMedicationService::insertOpenEMRRecord - TRACE: " . $exception->getTraceAsString());
-            $processingResult->setInternalErrors($exception->getMessage());
+            $processingResult->addInternalError($exception->getMessage());
         }
 
-        error_log("FhirMedicationService::insertOpenEMRRecord - END, hasData: " . ($processingResult->hasData() ? 'true' : 'false'));
         return $processingResult;
     }
 

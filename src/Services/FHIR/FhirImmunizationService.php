@@ -265,4 +265,330 @@ class FhirImmunizationService extends FhirServiceBase implements IResourceUSCIGP
     {
         return new FhirSearchParameterDefinition('patient', SearchFieldType::REFERENCE, [new ServiceField('puuid', ServiceField::TYPE_UUID)]);
     }
+
+    /**
+     * Parses a FHIR Immunization resource, returning the equivalent OpenEMR record.
+     *
+     * @param \OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource $fhirResource The source FHIR resource
+     * @return array a mapped OpenEMR data record (array)
+     */
+    public function parseFhirResource(\OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource $fhirResource)
+    {
+        // Ensure it's an Immunization resource
+        if (!($fhirResource instanceof FHIRImmunization)) {
+            throw new \InvalidArgumentException("Resource must be of type FHIRImmunization");
+        }
+        
+        $data = [];
+
+        // Extract patient reference
+        $patientRef = $fhirResource->getPatient();
+        if (!empty($patientRef)) {
+            $patientReference = UtilsService::parseReference($patientRef);
+            if (!empty($patientReference) && $patientReference['type'] === 'Patient' && $patientReference['localResource']) {
+                $data['puuid'] = $patientReference['uuid'];
+            } elseif (is_array($patientRef) && !empty($patientRef['reference'])) {
+                // Handle array format (from JSON deserialization)
+                $referenceString = $patientRef['reference'];
+                $parts = explode('/', $referenceString);
+                if (count($parts) >= 2 && $parts[0] === 'Patient') {
+                    $data['puuid'] = $parts[1];
+                }
+            }
+        }
+
+        // Extract status
+        $status = $fhirResource->getStatus();
+        if (!empty($status)) {
+            $statusValue = is_object($status) && method_exists($status, 'getValue') ? $status->getValue() : (string)$status;
+            if ($statusValue === 'entered-in-error') {
+                $data['added_erroneously'] = '1';
+                $data['completion_status'] = 'Completed';
+            } elseif ($statusValue === 'completed') {
+                $data['added_erroneously'] = '0';
+                $data['completion_status'] = 'Completed';
+            } else {
+                $data['added_erroneously'] = '0';
+                $data['completion_status'] = 'Not Administered';
+            }
+        } else {
+            $data['added_erroneously'] = '0';
+            $data['completion_status'] = 'Completed';
+        }
+
+        // Extract vaccine code (CVX code)
+        $vaccineCode = $fhirResource->getVaccineCode();
+        if (!empty($vaccineCode)) {
+            $codings = null;
+            if (is_object($vaccineCode) && method_exists($vaccineCode, 'getCoding')) {
+                $codings = $vaccineCode->getCoding();
+            } elseif (is_array($vaccineCode) && !empty($vaccineCode['coding'])) {
+                $codings = $vaccineCode['coding'];
+            }
+            
+            if (!empty($codings)) {
+                foreach ($codings as $coding) {
+                    $system = null;
+                    $code = null;
+                    $display = null;
+                    
+                    if (is_object($coding)) {
+                        $systemObj = method_exists($coding, 'getSystem') ? $coding->getSystem() : null;
+                        $system = is_object($systemObj) && method_exists($systemObj, 'getValue') ? $systemObj->getValue() : (string)($systemObj ?? '');
+                        $codeObj = method_exists($coding, 'getCode') ? $coding->getCode() : null;
+                        $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)($codeObj ?? '');
+                        $displayObj = method_exists($coding, 'getDisplay') ? $coding->getDisplay() : null;
+                        $display = is_object($displayObj) && method_exists($displayObj, 'getValue') ? $displayObj->getValue() : (string)($displayObj ?? '');
+                    } elseif (is_array($coding)) {
+                        $system = $coding['system'] ?? '';
+                        $code = $coding['code'] ?? '';
+                        $display = $coding['display'] ?? '';
+                    }
+                    
+                    // CVX code system: http://hl7.org/fhir/sid/cvx
+                    if ($system === 'http://hl7.org/fhir/sid/cvx' && !empty($code)) {
+                        $data['cvx_code'] = $code;
+                        if (!empty($display)) {
+                            $data['cvx_code_text'] = $display;
+                        }
+                        break; // Use first CVX code found
+                    }
+                }
+            }
+        }
+
+        // Extract occurrence date (administered date)
+        $occurrenceDateTime = $fhirResource->getOccurrenceDateTime();
+        if (!empty($occurrenceDateTime)) {
+            $dateValue = is_object($occurrenceDateTime) && method_exists($occurrenceDateTime, 'getValue') 
+                ? $occurrenceDateTime->getValue() 
+                : (string)$occurrenceDateTime;
+            if (!empty($dateValue)) {
+                try {
+                    $dateObj = new \DateTime($dateValue);
+                    $data['administered_date'] = $dateObj->format('Y-m-d H:i:s');
+                } catch (\Exception $e) {
+                    // If date parsing fails, try to extract just the date part
+                    if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                        $data['administered_date'] = $matches[1] . ' 00:00:00';
+                    }
+                }
+            }
+        }
+
+        // Extract recorded date (create date)
+        $recorded = $fhirResource->getRecorded();
+        if (!empty($recorded)) {
+            $dateValue = is_object($recorded) && method_exists($recorded, 'getValue') 
+                ? $recorded->getValue() 
+                : (string)$recorded;
+            if (!empty($dateValue)) {
+                try {
+                    $dateObj = new \DateTime($dateValue);
+                    $data['create_date'] = $dateObj->format('Y-m-d H:i:s');
+                } catch (\Exception $e) {
+                    // If date parsing fails, try to extract just the date part
+                    if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                        $data['create_date'] = $matches[1] . ' 00:00:00';
+                    }
+                }
+            }
+        }
+
+        // Extract expiration date
+        $expirationDate = $fhirResource->getExpirationDate();
+        if (!empty($expirationDate)) {
+            $dateValue = is_object($expirationDate) && method_exists($expirationDate, 'getValue') 
+                ? $expirationDate->getValue() 
+                : (string)$expirationDate;
+            if (!empty($dateValue)) {
+                try {
+                    $dateObj = new \DateTime($dateValue);
+                    $data['expiration_date'] = $dateObj->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // If date parsing fails, try to extract just the date part
+                    if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                        $data['expiration_date'] = $matches[1];
+                    }
+                }
+            }
+        }
+
+        // Extract lot number
+        $lotNumber = $fhirResource->getLotNumber();
+        if (!empty($lotNumber)) {
+            $lotValue = is_object($lotNumber) && method_exists($lotNumber, 'getValue') 
+                ? $lotNumber->getValue() 
+                : (string)$lotNumber;
+            if (!empty($lotValue)) {
+                $data['lot_number'] = $lotValue;
+            }
+        }
+
+        // Extract site (administration site)
+        $site = $fhirResource->getSite();
+        if (!empty($site)) {
+            $codings = null;
+            if (is_object($site) && method_exists($site, 'getCoding')) {
+                $codings = $site->getCoding();
+            } elseif (is_array($site) && !empty($site['coding'])) {
+                $codings = $site['coding'];
+            }
+            
+            if (!empty($codings)) {
+                $primaryCoding = is_array($codings) ? ($codings[0] ?? null) : $codings;
+                if (!empty($primaryCoding)) {
+                    $code = null;
+                    $display = null;
+                    
+                    if (is_object($primaryCoding)) {
+                        $codeObj = method_exists($primaryCoding, 'getCode') ? $primaryCoding->getCode() : null;
+                        $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)($codeObj ?? '');
+                        $displayObj = method_exists($primaryCoding, 'getDisplay') ? $primaryCoding->getDisplay() : null;
+                        $display = is_object($displayObj) && method_exists($displayObj, 'getValue') ? $displayObj->getValue() : (string)($displayObj ?? '');
+                    } elseif (is_array($primaryCoding)) {
+                        $code = $primaryCoding['code'] ?? '';
+                        $display = $primaryCoding['display'] ?? '';
+                    }
+                    
+                    if (!empty($code)) {
+                        $data['site_code'] = $code;
+                        $data['site_display'] = $display ?: $code;
+                        // Note: administration_site needs to be mapped to list_options option_id
+                        // For now, we'll store the code and let the insert method handle the mapping
+                        $data['administration_site'] = $code;
+                    }
+                }
+            }
+        }
+
+        // Extract route
+        $route = $fhirResource->getRoute();
+        if (!empty($route)) {
+            $codings = null;
+            if (is_object($route) && method_exists($route, 'getCoding')) {
+                $codings = $route->getCoding();
+            } elseif (is_array($route) && !empty($route['coding'])) {
+                $codings = $route['coding'];
+            }
+            
+            if (!empty($codings)) {
+                $primaryCoding = is_array($codings) ? ($codings[0] ?? null) : $codings;
+                if (!empty($primaryCoding)) {
+                    $code = null;
+                    if (is_object($primaryCoding)) {
+                        $codeObj = method_exists($primaryCoding, 'getCode') ? $primaryCoding->getCode() : null;
+                        $code = is_object($codeObj) && method_exists($codeObj, 'getValue') ? $codeObj->getValue() : (string)($codeObj ?? '');
+                    } elseif (is_array($primaryCoding)) {
+                        $code = $primaryCoding['code'] ?? '';
+                    }
+                    
+                    if (!empty($code)) {
+                        $data['route'] = $code;
+                    }
+                }
+            }
+        }
+
+        // Extract dose quantity
+        $doseQuantity = $fhirResource->getDoseQuantity();
+        if (!empty($doseQuantity)) {
+            $value = null;
+            $unit = null;
+            
+            if (is_object($doseQuantity)) {
+                $valueObj = method_exists($doseQuantity, 'getValue') ? $doseQuantity->getValue() : null;
+                $value = is_object($valueObj) && method_exists($valueObj, 'getValue') ? $valueObj->getValue() : (float)($valueObj ?? 0);
+                $unitObj = method_exists($doseQuantity, 'getUnit') ? $doseQuantity->getUnit() : null;
+                $unit = is_object($unitObj) && method_exists($unitObj, 'getValue') ? $unitObj->getValue() : (string)($unitObj ?? '');
+            } elseif (is_array($doseQuantity)) {
+                $value = isset($doseQuantity['value']) ? (float)$doseQuantity['value'] : 0;
+                $unit = $doseQuantity['unit'] ?? '';
+            }
+            
+            if ($value > 0) {
+                $data['amount_administered'] = $value;
+            }
+            if (!empty($unit)) {
+                $data['amount_administered_unit'] = $unit;
+            }
+        }
+
+        // Extract performer (administered by)
+        $performers = $fhirResource->getPerformer();
+        if (!empty($performers)) {
+            $performer = is_array($performers) ? ($performers[0] ?? null) : $performers;
+            if (!empty($performer)) {
+                $actor = null;
+                if (is_object($performer) && method_exists($performer, 'getActor')) {
+                    $actor = $performer->getActor();
+                } elseif (is_array($performer) && !empty($performer['actor'])) {
+                    $actor = $performer['actor'];
+                }
+                
+                if (!empty($actor)) {
+                    $practitionerRef = UtilsService::parseReference($actor);
+                    if (!empty($practitionerRef) && $practitionerRef['type'] === 'Practitioner' && $practitionerRef['localResource']) {
+                        $data['provider_uuid'] = $practitionerRef['uuid'];
+                    } elseif (is_array($actor) && !empty($actor['reference'])) {
+                        $referenceString = $actor['reference'];
+                        $parts = explode('/', $referenceString);
+                        if (count($parts) >= 2 && $parts[0] === 'Practitioner') {
+                            $data['provider_uuid'] = $parts[1];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract primary source
+        $primarySource = $fhirResource->getPrimarySource();
+        if ($primarySource !== null) {
+            $primarySourceValue = is_object($primarySource) && method_exists($primarySource, 'getValue') 
+                ? $primarySource->getValue() 
+                : (bool)$primarySource;
+            $data['primarySource'] = $primarySourceValue ? '1' : '0';
+            // Map to information_source
+            if ($primarySourceValue) {
+                $data['information_source'] = 'new_immunization_record';
+            } else {
+                $data['information_source'] = 'other_provider';
+            }
+        }
+
+        // Extract notes
+        $notes = $fhirResource->getNote();
+        if (!empty($notes)) {
+            $noteTexts = [];
+            foreach ($notes as $note) {
+                $text = null;
+                if (is_object($note) && method_exists($note, 'getText')) {
+                    $textObj = $note->getText();
+                    $text = is_object($textObj) && method_exists($textObj, 'getValue') ? $textObj->getValue() : (string)($textObj ?? '');
+                } elseif (is_array($note) && !empty($note['text'])) {
+                    $text = $note['text'];
+                }
+                
+                if (!empty($text)) {
+                    $noteTexts[] = $text;
+                }
+            }
+            
+            if (!empty($noteTexts)) {
+                $data['note'] = implode("\n", $noteTexts);
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Inserts an OpenEMR record into the system.
+     * @param array $openEmrRecord The OpenEMR data record to insert
+     * @return ProcessingResult The OpenEMR processing result.
+     */
+    protected function insertOpenEMRRecord($openEmrRecord)
+    {
+        return $this->immunizationService->insert($openEmrRecord);
+    }
 }

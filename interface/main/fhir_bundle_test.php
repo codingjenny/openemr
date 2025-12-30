@@ -245,11 +245,11 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         <option value="patient_procedure"><?php echo xlt('範例：Patient + Procedure'); ?></option>
                         <option value="patient_encounter_procedure"><?php echo xlt('範例：Patient + Encounter + Procedure'); ?></option>
                         <option value="patient_careplan"><?php echo xlt('範例：Patient + CarePlan'); ?></option>
-                        <option value="patient_careteam"><?php echo xlt('範例：Patient + CareTeam'); ?></option>
+                        <option value="patient_careteam"><?php echo xlt('範例：Patient + Practitioner + Organization + CareTeam'); ?></option>
+                        <option value="patient_goal"><?php echo xlt('範例：Patient + Goal'); ?></option>
                         <option value="patient_encounter_diagnosticreport"><?php echo xlt('範例：Patient + Encounter + DiagnosticReport'); ?></option>
                         <option value="patient_questionnaire_response"><?php echo xlt('範例：Patient + QuestionnaireResponse'); ?></option>
-                        <option value="patient_medication"><?php echo xlt('範例：Patient + Medication'); ?></option>
-                        <option value="patient_medication_request"><?php echo xlt('範例：Patient + MedicationRequest'); ?></option>
+                        <option value="patient_immunization"><?php echo xlt('範例：Patient + Immunization'); ?></option>
                         <option value="multiple_patients"><?php echo xlt('範例：多個 Patient'); ?></option>
                     </select>
                 </div>
@@ -1277,6 +1277,12 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                                         "prefix": ["Dr."]
                                     }
                                 ],
+                                "identifier": [
+                                    {
+                                        "system": "http://hl7.org/fhir/sid/us-npi",
+                                        "value": "1234567890"
+                                    }
+                                ],
                                 "telecom": [
                                     {
                                         "system": "phone",
@@ -1308,6 +1314,12 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                             "resource": {
                                 "resourceType": "Organization",
                                 "name": "Taipei General Hospital",
+                                "identifier": [
+                                    {
+                                        "system": "http://hl7.org/fhir/sid/us-npi",
+                                        "value": "9876543210"
+                                    }
+                                ],
                                 "type": [
                                     {
                                         "coding": [
@@ -1696,46 +1708,9 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                         }
                     ]
                 };
-            } else if (type === 'patient_medication') {
-                example = {
-                    "resourceType": "Bundle",
-                    "type": "transaction",
-                    "entry": [
-                        {
-                            "fullUrl": "urn:uuid:medication-001",
-                            "request": {
-                                "method": "POST",
-                                "url": "Medication"
-                            },
-                            "resource": {
-                                "resourceType": "Medication",
-                                "status": "active",
-                                "code": {
-                                    "coding": [
-                                        {
-                                            "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
-                                            "code": "1049502",
-                                            "display": "Amoxicillin 250 MG Oral Capsule"
-                                        }
-                                    ],
-                                    "text": "Amoxicillin 250 MG Oral Capsule"
-                                },
-                                "form": {
-                                    "coding": [
-                                        {
-                                            "system": "http://snomed.info/sct",
-                                            "code": "385055001",
-                                            "display": "Tablet"
-                                        }
-                                    ],
-                                    "text": "Tablet"
-                                }
-                            }
-                        }
-                    ]
-                };
-            } else if (type === 'patient_medication_request') {
-                var patientUuid = "urn:uuid:patient-mr-001";
+            } else if (type === 'patient_goal') {
+                // Patient + Goal transaction bundle
+                var patientUuid = "urn:uuid:patient-goal-001";
                 example = {
                     "resourceType": "Bundle",
                     "type": "transaction",
@@ -1748,59 +1723,197 @@ $site_id = $_SESSION['site_id'] ?? 'default';
                             },
                             "resource": {
                                 "resourceType": "Patient",
+                                "identifier": [
+                                    {
+                                        "use": "official",
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "PT"
+                                                }
+                                            ]
+                                        },
+                                        "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                        "value": "800"
+                                    }
+                                ],
+                                "active": true,
                                 "name": [
                                     {
                                         "use": "official",
                                         "family": "Chen",
-                                        "given": ["Ming", "Hua"]
+                                        "given": ["Yi", "Ming"]
                                     }
                                 ],
                                 "gender": "male",
-                                "birthDate": "1975-03-20",
-                                "telecom": [
+                                "birthDate": "1985-05-15",
+                                "address": [
                                     {
-                                        "system": "phone",
-                                        "value": "0987654321"
-                                    },
-                                    {
-                                        "system": "email",
-                                        "value": "chen.minghua@example.com"
+                                        "use": "home",
+                                        "line": ["456 Health Street"],
+                                        "city": "Kaohsiung",
+                                        "postalCode": "800",
+                                        "country": "TW"
                                     }
                                 ]
                             }
                         },
                         {
-                            "fullUrl": "urn:uuid:medication-request-001",
+                            "fullUrl": "urn:uuid:goal-001",
                             "request": {
                                 "method": "POST",
-                                "url": "MedicationRequest"
+                                "url": "Goal"
                             },
                             "resource": {
-                                "resourceType": "MedicationRequest",
-                                "status": "active",
-                                "intent": "order",
-                                "subject": {
-                                    "reference": patientUuid
-                                },
-                                "medicationCodeableConcept": {
+                                "resourceType": "Goal",
+                                "lifecycleStatus": "active",
+                                "achievementStatus": {
                                     "coding": [
                                         {
-                                            "system": "http://www.nlm.nih.gov/research/umls/rxnorm",
-                                            "code": "1049221",
-                                            "display": "Acetaminophen 325 MG Oral Tablet"
+                                            "system": "http://terminology.hl7.org/CodeSystem/goal-achievement",
+                                            "code": "in-progress",
+                                            "display": "In Progress"
                                         }
                                     ],
-                                    "text": "Acetaminophen 325mg tablet"
+                                    "text": "In Progress"
                                 },
-                                "authoredOn": "2024-12-16T10:00:00Z",
-                                "dosageInstruction": [
+                                "description": {
+                                    "text": "Reduce blood pressure to below 140/90 mmHg"
+                                },
+                                "subject": {
+                                    "reference": patientUuid,
+                                    "type": "Patient"
+                                },
+                                "target": [
                                     {
-                                        "text": "Take 1-2 tablets by mouth every 4-6 hours as needed for pain. Do not exceed 8 tablets in 24 hours."
+                                        "measure": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://loinc.org",
+                                                    "code": "8480-6",
+                                                    "display": "Systolic blood pressure"
+                                                }
+                                            ],
+                                            "text": "Systolic blood pressure"
+                                        },
+                                        "detailString": "Target: < 140 mmHg",
+                                        "dueDate": "2025-06-30"
+                                    },
+                                    {
+                                        "measure": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://loinc.org",
+                                                    "code": "8462-4",
+                                                    "display": "Diastolic blood pressure"
+                                                }
+                                            ],
+                                            "text": "Diastolic blood pressure"
+                                        },
+                                        "detailString": "Target: < 90 mmHg",
+                                        "dueDate": "2025-06-30"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                };
+            } else if (type === 'patient_immunization') {
+                example = {
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [
+                        {
+                            "fullUrl": "urn:uuid:patient-immunization-001",
+                            "request": {
+                                "method": "POST",
+                                "url": "Patient"
+                            },
+                            "resource": {
+                                "resourceType": "Patient",
+                                "name": [
+                                    {
+                                        "use": "official",
+                                        "family": "Chen",
+                                        "given": ["Xiao", "Hua"]
                                     }
                                 ],
+                                "gender": "male",
+                                "birthDate": "1990-03-15",
+                                "telecom": [
+                                    {
+                                        "system": "phone",
+                                        "value": "0912345678"
+                                    },
+                                    {
+                                        "system": "email",
+                                        "value": "chen.xiaohua@example.com"
+                                    }
+                                ],
+                                "address": [
+                                    {
+                                        "line": ["789 Health Street"],
+                                        "city": "Taipei",
+                                        "postalCode": "105",
+                                        "country": "TW"
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "request": {
+                                "method": "POST",
+                                "url": "Immunization"
+                            },
+                            "resource": {
+                                "resourceType": "Immunization",
+                                "status": "completed",
+                                "vaccineCode": {
+                                    "coding": [
+                                        {
+                                            "system": "http://hl7.org/fhir/sid/cvx",
+                                            "code": "140",
+                                            "display": "Influenza, seasonal, injectable, preservative free"
+                                        }
+                                    ],
+                                    "text": "Influenza vaccine"
+                                },
+                                "patient": {
+                                    "reference": "urn:uuid:patient-immunization-001"
+                                },
+                                "occurrenceDateTime": "2024-12-15T10:00:00Z",
+                                "primarySource": true,
+                                "lotNumber": "ABC123",
+                                "site": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/v3-ActSite",
+                                            "code": "LA",
+                                            "display": "left arm"
+                                        }
+                                    ],
+                                    "text": "Left arm"
+                                },
+                                "route": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/v3-RouteOfAdministration",
+                                            "code": "IM",
+                                            "display": "Intramuscular injection"
+                                        }
+                                    ],
+                                    "text": "Intramuscular"
+                                },
+                                "doseQuantity": {
+                                    "value": 0.5,
+                                    "unit": "mL",
+                                    "system": "http://unitsofmeasure.org",
+                                    "code": "mL"
+                                },
                                 "note": [
                                     {
-                                        "text": "Patient reported allergy to aspirin. Use acetaminophen for fever and pain management."
+                                        "text": "Annual flu vaccination"
                                     }
                                 ]
                             }
