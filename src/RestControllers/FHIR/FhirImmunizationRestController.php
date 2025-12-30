@@ -17,6 +17,8 @@ use OpenEMR\Services\FHIR\FhirImmunizationService;
 use OpenEMR\Services\FHIR\FhirValidationService;
 use OpenEMR\RestControllers\RestControllerHelper;
 use OpenEMR\FHIR\R4\FHIRResource\FHIRBundle\FHIRBundleEntry;
+use OpenEMR\FHIR\R4\PHPFHIRResponseParser;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRImmunization;
 
 require_once(__DIR__ . '/../../../_rest_config.php');
 
@@ -34,6 +36,75 @@ class FhirImmunizationRestController
         $this->fhirService = new FhirResourcesService();
         $this->fhirImmunizationService = new FhirImmunizationService();
         $this->fhirValidate = new FhirValidationService();
+    }
+
+    /**
+     * Creates a new FHIR immunization resource
+     * @param $fhirJson The FHIR immunization resource
+     * @returns 201 if the resource is created, 400 if the resource is invalid, 501 if not implemented
+     */
+    public function post($fhirJson)
+    {
+        try {
+            $fhirValidate = $this->fhirValidate->validate($fhirJson);
+            if (!empty($fhirValidate)) {
+                return RestControllerHelper::responseHandler($fhirValidate, null, 400);
+            }
+
+            // Parse JSON to FHIRImmunization object
+            // Handle both array and string input
+            $jsonString = is_array($fhirJson) ? json_encode($fhirJson) : $fhirJson;
+            if (is_string($fhirJson) && empty(trim($fhirJson))) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Empty Immunization resource provided'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+            
+            $parser = new PHPFHIRResponseParser(false);
+            $fhirResource = $parser->parse($jsonString);
+            
+            if (!($fhirResource instanceof FHIRImmunization)) {
+                return RestControllerHelper::responseHandler(
+                    [
+                        'resourceType' => 'OperationOutcome',
+                        'issue' => [
+                            [
+                                'severity' => 'error',
+                                'code' => 'invalid',
+                                'diagnostics' => 'Resource must be of type Immunization'
+                            ]
+                        ]
+                    ],
+                    null,
+                    400
+                );
+            }
+
+            $processingResult = $this->fhirImmunizationService->insert($fhirResource);
+            $result = RestControllerHelper::handleFhirProcessingResult($processingResult, 201);
+            return $result;
+        } catch (\Throwable $e) {
+            return RestControllerHelper::responseHandler(
+                [
+                    'error' => 'Internal server error processing Immunization',
+                    'message' => $e->getMessage(),
+                    'type' => get_class($e)
+                ],
+                null,
+                500
+            );
+        }
     }
 
     /**

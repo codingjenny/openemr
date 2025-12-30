@@ -82,14 +82,34 @@ class DrugService extends BaseService
      */
     public function getOne($uuid)
     {
-        $search = [
-            'uuid' => new TokenSearchField('uuid', [new TokenSearchValue($uuid, null, false)])
-        ];
-        // so if we have a puuid we need to make sure we only return drugs that are connected to the current patient.
-        if (isset($puuid)) {
-            $search['puuid'] = new ReferenceSearchField('puuid', [new ReferenceSearchValue($puuid, 'Patient', true)]);
+        // Direct query to avoid issues with complex JOIN queries and field name resolution
+        $processingResult = new ProcessingResult();
+        try {
+            $uuidBytes = UuidRegistry::uuidToBytes($uuid);
+            $sql = "SELECT drug_id, uuid, name, ndc_number, form, size, unit, route, related_code, active, drug_code, 
+                    last_updated AS drug_last_updated, date_created AS drug_date_created 
+                    FROM drugs WHERE uuid = ?";
+            $result = QueryUtils::fetchRecords($sql, [$uuidBytes]);
+            
+            if (!empty($result)) {
+                $row = $result[0];
+                // Convert UUID from binary to string for consistency
+                if (isset($row['uuid'])) {
+                    $row['uuid'] = UuidRegistry::uuidToString($row['uuid']);
+                }
+                // Set default values for missing fields
+                $row['active'] = $row['active'] ?? 1;
+                $row['rxnorm_drugcode'] = $row['drug_code'] ?? '';
+                
+                $resultRecord = $this->createResultRecordFromDatabaseResult($row);
+                $processingResult->addData($resultRecord);
+            }
+        } catch (\Exception $exception) {
+            (new SystemLogger())->error($exception->getMessage(), ['trace' => $exception->getTraceAsString()]);
+            $processingResult->addInternalError("Error selecting data from database");
         }
-        return $this->search($search);
+        
+        return $processingResult;
     }
 
     public function search($search, $isAndCondition = true)
