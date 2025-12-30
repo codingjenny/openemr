@@ -8,7 +8,10 @@
 
 1. 登入 OpenEMR 系統（帳：admin/密：TestUser123!）
 2. 在瀏覽器中訪問：`https://<your-openemr-domain>/interface/main/fhir_bundle_test.php`
-3. 例如：`https://localhost:9300/interface/main/fhir_bundle_test.php`
+3. 或者從介面進入
+
+   <img width="1507" height="822" alt="截圖 2025-12-30 上午11 31 57" src="https://github.com/user-attachments/assets/213a02dc-31c5-4bf1-b6ed-284b5ed52a81" />
+
 
 ## 功能特點
 
