@@ -6,7 +6,7 @@
 
 ## 訪問方式
 
-1. 登入 OpenEMR 系統
+1. 登入 OpenEMR 系統（帳：admin/密：TestUser123!）
 2. 在瀏覽器中訪問：`https://<your-openemr-domain>/interface/main/fhir_bundle_test.php`
 3. 例如：`https://localhost:9300/interface/main/fhir_bundle_test.php`
 
